@@ -58,17 +58,24 @@ def _walk_strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
             yield from _walk_strings(sub, f"{path}[{i}]")
 
 
-def _tool_name(tool: dict[str, Any], index: int) -> str:
-    name = tool.get("name")
-    if isinstance(name, str) and name.strip():
-        return name
-    return f"<tool #{index}>"
+# The order kinds are reported in: tools first, then prompts, then resources.
+KINDS = ("tool", "prompt", "resource")
 
 
-def scan_tool(tool: dict[str, Any], index: int = 0) -> ToolResult:
-    """Scan one tool definition and return its findings and score."""
-    result = ToolResult(name=_tool_name(tool, index))
-    for path, text in _walk_strings(tool, ""):
+def _entity_label(entity: dict[str, Any], kind: str, index: int) -> str:
+    # A resource has no name of its own in older servers, so fall back to the
+    # URI it is addressed by, then the URI template, before a positional label.
+    for key in ("name", "uri", "uriTemplate", "title"):
+        value = entity.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return f"<{kind} #{index}>"
+
+
+def scan_entity(entity: dict[str, Any], kind: str = "tool", index: int = 0) -> ToolResult:
+    """Scan one tool, prompt or resource definition into a result."""
+    result = ToolResult(name=_entity_label(entity, kind, index), kind=kind)
+    for path, text in _walk_strings(entity, ""):
         for rule, severity, offset, length, message in scan_text(text):
             result.findings.append(
                 Finding(
@@ -76,6 +83,7 @@ def scan_tool(tool: dict[str, Any], index: int = 0) -> ToolResult:
                     severity=severity,
                     path=path,
                     offset=offset,
+                    match=text[offset:offset + length],
                     excerpt=_excerpt(text, offset, length),
                     message=message,
                 )
@@ -84,8 +92,29 @@ def scan_tool(tool: dict[str, Any], index: int = 0) -> ToolResult:
     return result
 
 
+def scan_tool(tool: dict[str, Any], index: int = 0) -> ToolResult:
+    """Scan one tool definition and return its findings and score."""
+    return scan_entity(tool, "tool", index)
+
+
 def scan_tools(tools: list[dict[str, Any]]) -> list[ToolResult]:
     """Scan a list of tools, highest risk first."""
-    results = [scan_tool(tool, i) for i, tool in enumerate(tools)]
-    results.sort(key=lambda r: (-r.score, r.name))
+    return scan_targets({"tool": tools})
+
+
+def scan_targets(groups: dict[str, list[dict[str, Any]]]) -> list[ToolResult]:
+    """Scan every entity across the kinds, grouped by kind, highest risk first.
+
+    Kinds are reported tools-then-prompts-then-resources, and within a kind the
+    riskiest entity leads. Grouping keeps the kind labels clustered instead of
+    interleaving a low-scoring prompt between two tools.
+    """
+    results: list[ToolResult] = []
+    for kind in KINDS:
+        group = [
+            scan_entity(entity, kind, i)
+            for i, entity in enumerate(groups.get(kind, []))
+        ]
+        group.sort(key=lambda r: (-r.score, r.name))
+        results.extend(group)
     return results

@@ -22,12 +22,27 @@ def _paint(band: str, text: str, color: bool) -> str:
     return f"{_COLORS.get(band, '')}{text}{_RESET}"
 
 
-def render_text(results: list[ToolResult], *, color: bool = False) -> str:
+def _scanned_clause(results: list[ToolResult]) -> str:
+    """A per-kind count of what was scanned, e.g. "3 tool(s), 1 prompt(s)".
+
+    Only kinds that are present are named, so a tools-only scan reads exactly as
+    it always has and a mixed scan spells out the extra surface it covered.
+    """
+    counts = {kind: 0 for kind in ("tool", "prompt", "resource")}
+    for r in results:
+        counts[r.kind] = counts.get(r.kind, 0) + 1
+    parts = [f"{n} {kind}(s)" for kind, n in counts.items() if n]
+    if not parts:
+        parts = ["0 tool(s)"]
+    return ", ".join(parts) + " scanned"
+
+
+def render_text(results: list[ToolResult], *, color: bool = False, baselined: int = 0) -> str:
     lines: list[str] = []
     total_findings = sum(len(r.findings) for r in results)
 
     for r in results:
-        header = f"{r.name}  risk {r.score}/100  [{r.band}]"
+        header = f"{r.kind} {r.name}  risk {r.score}/100  [{r.band}]"
         lines.append(_paint(r.band, header, color))
         for f in r.findings:
             tag = f"[{f.severity.label.upper()}]"
@@ -39,41 +54,54 @@ def render_text(results: list[ToolResult], *, color: bool = False) -> str:
 
     flagged = sum(1 for r in results if r.findings)
     summary = (
-        f"{len(results)} tool(s) scanned, {flagged} flagged, "
+        f"{_scanned_clause(results)}, {flagged} flagged, "
         f"{total_findings} finding(s)."
     )
+    if baselined:
+        summary += f" {baselined} baselined."
     lines.append(summary)
     return "\n".join(lines)
 
 
-def to_json(results: list[ToolResult]) -> dict[str, Any]:
+def _entity_json(r: ToolResult) -> dict[str, Any]:
     return {
-        "tools": [
+        "name": r.name,
+        "score": r.score,
+        "band": r.band,
+        "findings": [
             {
-                "name": r.name,
-                "score": r.score,
-                "band": r.band,
-                "findings": [
-                    {
-                        "rule": f.rule,
-                        "severity": f.severity.label,
-                        "path": f.path,
-                        "offset": f.offset,
-                        "message": f.message,
-                        "excerpt": f.excerpt,
-                    }
-                    for f in r.findings
-                ],
+                "rule": f.rule,
+                "severity": f.severity.label,
+                "path": f.path,
+                "offset": f.offset,
+                "message": f.message,
+                "excerpt": f.excerpt,
             }
-            for r in results
+            for f in r.findings
         ],
+    }
+
+
+def to_json(results: list[ToolResult], *, baselined: int = 0) -> dict[str, Any]:
+    # Grouped by kind so the "tools" array keeps its existing shape and prompts
+    # and resources appear alongside it rather than mixed in.
+    grouped = {kind: [] for kind in ("tool", "prompt", "resource")}
+    for r in results:
+        grouped.setdefault(r.kind, []).append(_entity_json(r))
+    return {
+        "tools": grouped["tool"],
+        "prompts": grouped["prompt"],
+        "resources": grouped["resource"],
         "summary": {
-            "tools": len(results),
+            "tools": len(grouped["tool"]),
+            "prompts": len(grouped["prompt"]),
+            "resources": len(grouped["resource"]),
             "flagged": sum(1 for r in results if r.findings),
             "findings": sum(len(r.findings) for r in results),
+            "baselined": baselined,
         },
     }
 
 
-def render_json(results: list[ToolResult]) -> str:
-    return json.dumps(to_json(results), indent=2, ensure_ascii=True)
+def render_json(results: list[ToolResult], *, baselined: int = 0) -> str:
+    return json.dumps(to_json(results, baselined=baselined), indent=2, ensure_ascii=True)

@@ -39,22 +39,36 @@ _MEDIUM_BAND = 15
 
 @dataclass(frozen=True)
 class Finding:
-    """A single hit: which rule, where, and the offending text."""
+    """A single hit: which rule, where, and the offending text.
+
+    ``match`` is the exact substring the rule flagged. ``excerpt`` is that same
+    text widened with surrounding context and rendered for display, so it moves
+    whenever nearby text changes. Identity keys on ``match``, never on
+    ``excerpt`` or ``offset``.
+    """
 
     rule: str
     severity: Severity
     path: str
     offset: int
+    match: str
     excerpt: str
     message: str
 
 
 @dataclass
 class ToolResult:
-    """All findings for one tool plus its rolled-up score."""
+    """All findings for one scanned entity plus its rolled-up score.
+
+    An MCP server exposes three kinds of model-facing metadata: ``tool``,
+    ``prompt`` and ``resource``. ``kind`` records which one this result came
+    from so mixed output stays legible and a prompt named like a tool keeps a
+    distinct baseline identity.
+    """
 
     name: str
     findings: list[Finding] = field(default_factory=list)
+    kind: str = "tool"
 
     @property
     def score(self) -> int:

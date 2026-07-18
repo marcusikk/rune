@@ -4,17 +4,19 @@ Notes for automated agents working in this repo.
 
 ## What rune is
 
-A scanner that reads MCP tool metadata (name, description, JSON schema) and
-flags hidden instructions: data exfiltration, injection, concealment, invisible
-characters, and fake instruction markup. It never calls a tool.
+A scanner that reads MCP metadata (name, description, JSON schema) for tools,
+prompts, and resources, and flags hidden instructions: data exfiltration,
+injection, concealment, invisible characters, and fake instruction markup. It
+lists only: it never calls a tool, renders a prompt, or reads a resource body.
 
 ## Layout
 
 - `rune/rules.py` - the detection rules. The heart of the tool. `scan_text`
   runs every rule over one string and returns `(rule, severity, offset, length,
   message)` hits.
-- `rune/scan.py` - walks a tool dict, tags each hit with its JSON path, and
-  rolls findings into a 0-100 score and a band.
+- `rune/scan.py` - walks an entity dict (tool, prompt, or resource), tags each
+  hit with its JSON path, and rolls findings into a 0-100 score and a band.
+  `scan_targets` groups the kinds; each result carries its `kind`.
 - `rune/report.py` - text and JSON rendering.
 - `rune/client.py` - live stdio scan via the MCP SDK (lazy import).
 - `rune/cli.py` - `main(argv, out, err)`, driven in-process by the tests.

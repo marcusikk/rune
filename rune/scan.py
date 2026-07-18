@@ -1,0 +1,91 @@
+"""Walk a tool's metadata, run the rules, and roll findings into a score."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import Any
+
+from .models import Finding, ToolResult
+from .rules import scan_text
+
+# How many characters of context to show around a hit.
+_EXCERPT_RADIUS = 40
+
+
+def _render_visible(text: str) -> str:
+    """Make hidden characters visible so an excerpt is readable and safe."""
+    out: list[str] = []
+    for ch in text:
+        cp = ord(ch)
+        if ch in "\t":
+            out.append(" ")
+        elif ch == "\n":
+            out.append("\\n")
+        elif cp < 0x20 or cp == 0x7F or 0x80 <= cp <= 0x9F or cp in (
+            0x200B,
+            0x200C,
+            0x200D,
+            0x2060,
+            0xFEFF,
+            0x00AD,
+            0x061C,
+        ) or 0x202A <= cp <= 0x202E or 0x2066 <= cp <= 0x2069 or 0xE0000 <= cp <= 0xE007F:
+            out.append(f"<U+{cp:04X}>")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _excerpt(text: str, offset: int, length: int) -> str:
+    start = max(0, offset - _EXCERPT_RADIUS)
+    end = min(len(text), offset + length + _EXCERPT_RADIUS)
+    snippet = _render_visible(text[start:end])
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
+
+
+def _walk_strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
+    """Yield (json_path, string) for every string leaf under value."""
+    if isinstance(value, str):
+        yield (path, value)
+    elif isinstance(value, dict):
+        for key, sub in value.items():
+            child = f"{path}.{key}" if path else str(key)
+            yield from _walk_strings(sub, child)
+    elif isinstance(value, list):
+        for i, sub in enumerate(value):
+            yield from _walk_strings(sub, f"{path}[{i}]")
+
+
+def _tool_name(tool: dict[str, Any], index: int) -> str:
+    name = tool.get("name")
+    if isinstance(name, str) and name.strip():
+        return name
+    return f"<tool #{index}>"
+
+
+def scan_tool(tool: dict[str, Any], index: int = 0) -> ToolResult:
+    """Scan one tool definition and return its findings and score."""
+    result = ToolResult(name=_tool_name(tool, index))
+    for path, text in _walk_strings(tool, ""):
+        for rule, severity, offset, length, message in scan_text(text):
+            result.findings.append(
+                Finding(
+                    rule=rule,
+                    severity=severity,
+                    path=path,
+                    offset=offset,
+                    excerpt=_excerpt(text, offset, length),
+                    message=message,
+                )
+            )
+    result.findings.sort(key=lambda f: (-f.severity.rank, f.path, f.offset))
+    return result
+
+
+def scan_tools(tools: list[dict[str, Any]]) -> list[ToolResult]:
+    """Scan a list of tools, highest risk first."""
+    results = [scan_tool(tool, i) for i, tool in enumerate(tools)]
+    results.sort(key=lambda r: (-r.score, r.name))
+    return results

@@ -131,7 +131,22 @@ Machine-readable output and CI:
 ```
 rune --manifest tools.json --json
 rune --manifest tools.json --fail-on high   # exit 1 only on high-severity findings
+rune --manifest tools.json --sarif > rune.sarif   # upload to code scanning
 ```
+
+`--json` is rune's own shape. `--sarif` emits SARIF 2.1.0, the format GitHub and
+GitLab code scanning ingest, so findings show up in the security tab beside the
+rest of your alerts instead of only as an exit code. Each result carries its rule
+id, a severity level (high maps to `error`, medium to `warning`), the manifest
+path as its artifact, and the JSON path to the poisoned field as a logical
+location. rune does not track a source line inside the manifest file, so results
+use that JSON-path logical location rather than a line region. The alert body
+quotes the exact substring the rule flagged, not the sentence around it, with any
+invisible characters escaped as `<U+XXXX>` so they are legible in the security tab. Every result also
+carries a `partialFingerprint` that is the same stable id `--baseline` uses, so
+the platform tracks a finding across runs and does not re-alert on one you have
+triaged. Upload it from a workflow with `github/codeql-action/upload-sarif`. A
+clean scan writes a valid log with no results, which clears prior alerts.
 
 ### Baseline: accept a finding without turning the gate off
 

@@ -8,7 +8,7 @@ import os
 from typing import Any, TextIO
 
 from .models import Severity
-from .report import render_json, render_text
+from .report import render_json, render_sarif, render_text
 from .scan import scan_targets
 
 _VERSION = "0.1.0"
@@ -59,6 +59,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="write the current findings to FILE as a baseline and exit 0",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument(
+        "--sarif",
+        action="store_true",
+        help="emit SARIF 2.1.0 for GitHub/GitLab code scanning",
+    )
     parser.add_argument(
         "--no-color", action="store_true", help="disable ANSI color in text output"
     )
@@ -275,7 +280,7 @@ def _normalize(data: Any) -> dict[str, list[dict[str, Any]]]:
 
 
 def _want_color(args: argparse.Namespace, out: TextIO) -> bool:
-    if args.no_color or args.json or os.environ.get("NO_COLOR"):
+    if args.no_color or args.json or args.sarif or os.environ.get("NO_COLOR"):
         return False
     return hasattr(out, "isatty") and out.isatty()
 
@@ -301,6 +306,10 @@ def main(
 
     if args.baseline and args.write_baseline:
         print("rune: use --baseline or --write-baseline, not both", file=err)
+        return _EXIT_ERROR
+
+    if args.json and args.sarif:
+        print("rune: use --json or --sarif, not both", file=err)
         return _EXIT_ERROR
 
     try:
@@ -355,7 +364,12 @@ def main(
             return _EXIT_ERROR
         baselined = apply_baseline(results, accepted)
 
-    if args.json:
+    if args.sarif:
+        # A live or piped scan has no file on disk to point an alert at, so the
+        # artifact URI is only set when a real manifest path was read.
+        source_uri = manifest if manifest and manifest != _STDIN_ARG else None
+        print(render_sarif(results, uri=source_uri, version=_VERSION), file=out)
+    elif args.json:
         print(render_json(results, baselined=baselined), file=out)
     else:
         print(render_text(results, color=_want_color(args, out), baselined=baselined), file=out)

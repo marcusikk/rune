@@ -35,6 +35,27 @@ from .models import Severity
 
 Hit = tuple[str, Severity, int, int, str]
 
+TextRule = Callable[[str], Iterator[Hit]]
+
+
+def _emits(*ids: str) -> Callable[[TextRule], TextRule]:
+    """Tag a rule with the ids it can emit, so RULE_IDS can be derived from it.
+
+    Anything that keeps its own per-rule table (the SARIF renderer declares a
+    description and a default level for each) has to stay in step with the
+    engine. Deriving RULE_IDS from the rule list rather than hand-writing it a
+    second time is what makes that checkable: a rule added below turns up in
+    RULE_IDS on its own, and a table that has not been updated fails its
+    coverage test. A new rule that forgets this tag fails at import, loudly,
+    rather than emitting findings no consumer knows about.
+    """
+
+    def tag(fn: TextRule) -> TextRule:
+        fn.rule_ids = ids
+        return fn
+
+    return tag
+
 
 # --- invisible / control characters -----------------------------------------
 
@@ -57,6 +78,7 @@ def _classify_hidden(ch: str) -> str | None:
     return None
 
 
+@_emits("invisible-characters")
 def _invisible(text: str) -> Iterator[Hit]:
     for i, ch in enumerate(text):
         kind = _classify_hidden(ch)
@@ -400,6 +422,7 @@ def _attached_dest(text: str, obj_end: int) -> re.Match[str] | None:
     return dest
 
 
+@_emits("data-exfiltration")
 def _exfiltration(text: str) -> Iterator[Hit]:
     reported: set[int] = set()
 
@@ -449,15 +472,15 @@ def _exfiltration(text: str) -> Iterator[Hit]:
 
 def _regex_rule(
     rule: str, severity: Severity, pattern: re.Pattern[str], message: str
-) -> Callable[[str], Iterator[Hit]]:
+) -> TextRule:
     def run(text: str) -> Iterator[Hit]:
         for m in pattern.finditer(text):
             yield (rule, severity, m.start(), m.end() - m.start(), message)
 
-    return run
+    return _emits(rule)(run)
 
 
-_TEXT_RULES: tuple[Callable[[str], Iterator[Hit]], ...] = (
+_TEXT_RULES: tuple[TextRule, ...] = (
     _invisible,
     _regex_rule(
         "hidden-instructions",
@@ -478,6 +501,12 @@ _TEXT_RULES: tuple[Callable[[str], Iterator[Hit]], ...] = (
         "markup a model may read as an instruction boundary",
     ),
     _exfiltration,
+)
+
+# Every rule id the engine can emit. Derived from _TEXT_RULES, never typed out
+# by hand, so it cannot drift from what the rules actually yield.
+RULE_IDS: frozenset[str] = frozenset(
+    rule_id for rule in _TEXT_RULES for rule_id in rule.rule_ids
 )
 
 

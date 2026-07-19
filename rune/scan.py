@@ -12,8 +12,13 @@ from .rules import scan_text
 _EXCERPT_RADIUS = 40
 
 
-def _render_visible(text: str) -> str:
-    """Make hidden characters visible so an excerpt is readable and safe."""
+def render_visible(text: str) -> str:
+    """Make hidden characters visible so flagged text is readable and safe.
+
+    Shared with the reporters: any surface that prints a snippet of scanned
+    metadata has to escape it, or the invisible characters rune exists to find
+    pass straight through the report unseen.
+    """
     out: list[str] = []
     for ch in text:
         cp = ord(ch)
@@ -39,7 +44,7 @@ def _render_visible(text: str) -> str:
 def _excerpt(text: str, offset: int, length: int) -> str:
     start = max(0, offset - _EXCERPT_RADIUS)
     end = min(len(text), offset + length + _EXCERPT_RADIUS)
-    snippet = _render_visible(text[start:end])
+    snippet = render_visible(text[start:end])
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(text) else ""
     return f"{prefix}{snippet}{suffix}"

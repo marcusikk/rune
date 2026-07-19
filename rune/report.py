@@ -1,11 +1,13 @@
-"""Render scan results as text or JSON."""
+"""Render scan results as text, JSON, or SARIF."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from .models import ToolResult
+from .baseline import fingerprint
+from .models import Finding, ToolResult
+from .scan import render_visible
 
 _COLORS = {
     "HIGH": "\033[31m",
@@ -107,3 +109,139 @@ def to_json(results: list[ToolResult], *, baselined: int = 0) -> dict[str, Any]:
 
 def render_json(results: list[ToolResult], *, baselined: int = 0) -> str:
     return json.dumps(to_json(results, baselined=baselined), indent=2, ensure_ascii=True)
+
+
+# --- SARIF 2.1.0 -------------------------------------------------------------
+#
+# SARIF is the format GitHub and GitLab code scanning ingest, so emitting it
+# lets rune's findings show up in the platform's security UI beside everything
+# else, instead of only as an exit code. This is a second machine format next to
+# --json, never a replacement: the --json shape is rune's own and unchanged.
+#
+# The one thing worth pointing out: SARIF has a first-class partialFingerprints
+# field whose whole job is to give a result a stable identity so the platform can
+# track it across runs and not re-alert on one a human already triaged. rune
+# already computes exactly that id for its baseline, so the two line up with no
+# new machinery - the SARIF fingerprint IS the baseline fingerprint.
+
+_SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+_INFORMATION_URI = "https://github.com/marcusikk/rune"
+
+# SARIF result levels, keyed by rune severity label. SARIF has no "high"; the
+# convention is error/warning/note, which maps cleanly onto high/medium/low.
+_SARIF_LEVELS = {"high": "error", "medium": "warning", "low": "note"}
+
+# The rules rune can emit, in a fixed order so ruleIndex is stable across runs.
+# Each entry is (id, one-line description, default level). The per-result level
+# still comes from the finding's own severity; this is only the rule's default.
+_SARIF_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "data-exfiltration",
+        "A secret is named as the object of an outbound verb sent to an "
+        "external destination.",
+        "error",
+    ),
+    (
+        "hidden-instructions",
+        "Text aimed at the reading model, such as an instruction to ignore its "
+        "prior context or change role.",
+        "error",
+    ),
+    (
+        "concealment",
+        "A directive to hide the tool's activity from the user.",
+        "error",
+    ),
+    (
+        "invisible-characters",
+        "Zero-width, bidirectional, or tag characters used to smuggle text past "
+        "a human reviewer.",
+        "warning",
+    ),
+    (
+        "injection-markup",
+        "Markup a model may read as an instruction boundary, such as <system> "
+        "or [INST].",
+        "warning",
+    ),
+)
+
+_RULE_INDEX = {rule_id: i for i, (rule_id, _, _) in enumerate(_SARIF_RULES)}
+
+
+def _sarif_driver(version: str) -> dict[str, Any]:
+    return {
+        "name": "rune",
+        "informationUri": _INFORMATION_URI,
+        "version": version,
+        "rules": [
+            {
+                "id": rule_id,
+                "name": rule_id,
+                "shortDescription": {"text": text},
+                "defaultConfiguration": {"level": level},
+                "helpUri": _INFORMATION_URI,
+            }
+            for rule_id, text, level in _SARIF_RULES
+        ],
+    }
+
+
+def _sarif_result(r: ToolResult, f: Finding, uri: str | None) -> dict[str, Any]:
+    location: dict[str, Any] = {
+        # The JSON path (e.g. inputSchema.properties.path.description) is where
+        # the poison sits inside the entity. rune does not track a source line in
+        # the manifest file, so the path goes in as a logical location, which is
+        # how SARIF names a spot in structured data that has no line of its own.
+        "logicalLocations": [{"fullyQualifiedName": f.path or r.name, "kind": "member"}],
+    }
+    if uri is not None:
+        location["physicalLocation"] = {"artifactLocation": {"uri": uri}}
+
+    result: dict[str, Any] = {
+        "ruleId": f.rule,
+        "level": _SARIF_LEVELS.get(f.severity.label, "warning"),
+        # The alert body names the exact substring the rule objected to, not
+        # f.excerpt: the excerpt widens the match with up to 40 characters of
+        # surrounding context on each side, so using it here would present
+        # benign neighbouring prose to a triager as the flagged text. Escaped,
+        # because an invisible-characters match is by definition unprintable.
+        "message": {
+            "text": f"{r.kind} {r.name}: {f.message}. Flagged text: {render_visible(f.match)}"
+        },
+        "locations": [location],
+        # Baseline and SARIF agree on identity, so a result carries the same id
+        # here that --baseline would suppress it by.
+        "partialFingerprints": {"runeFingerprint/v1": fingerprint(r.name, f, kind=r.kind)},
+        "properties": {"kind": r.kind, "target": r.name, "score": r.score, "band": r.band},
+    }
+    if f.rule in _RULE_INDEX:
+        result["ruleIndex"] = _RULE_INDEX[f.rule]
+    return result
+
+
+def to_sarif(
+    results: list[ToolResult], *, uri: str | None = None, version: str = "0.1.0"
+) -> dict[str, Any]:
+    """Build a SARIF 2.1.0 log from scan results.
+
+    ``uri`` is the manifest file the results came from, used as the artifact
+    location. It is left off for a live (``--stdio``) or piped (stdin) scan,
+    which have no file on disk; those results carry only their JSON-path logical
+    location. A fully clean scan produces an empty ``results`` array, which is a
+    valid log and tells the platform to clear any alerts it had cleared before.
+    """
+    sarif_results = [
+        _sarif_result(r, f, uri) for r in results for f in r.findings
+    ]
+    return {
+        "$schema": _SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [{"tool": {"driver": _sarif_driver(version)}, "results": sarif_results}],
+    }
+
+
+def render_sarif(
+    results: list[ToolResult], *, uri: str | None = None, version: str = "0.1.0"
+) -> str:
+    return json.dumps(to_sarif(results, uri=uri, version=version), indent=2, ensure_ascii=True)

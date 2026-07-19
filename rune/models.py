@@ -60,10 +60,11 @@ class Finding:
 class ToolResult:
     """All findings for one scanned entity plus its rolled-up score.
 
-    An MCP server exposes three kinds of model-facing metadata: ``tool``,
-    ``prompt`` and ``resource``. ``kind`` records which one this result came
-    from so mixed output stays legible and a prompt named like a tool keeps a
-    distinct baseline identity.
+    An MCP server exposes model-facing metadata as ``tool``, ``prompt`` and
+    ``resource`` listings, plus its own ``server`` metadata (the initialize
+    ``instructions`` and ``serverInfo``). ``kind`` records which one this result
+    came from so mixed output stays legible and a prompt named like a tool keeps
+    a distinct baseline identity.
     """
 
     name: str

@@ -66,6 +66,17 @@ async def _fetch(
                     init = await session.initialize()
                     caps = init.capabilities
 
+                    # The server's own instructions and serverInfo are the first
+                    # trusted text a client feeds its model, so scan them too.
+                    server: list[dict[str, Any]] = []
+                    entity: dict[str, Any] = {}
+                    if isinstance(init.instructions, str) and init.instructions:
+                        entity["instructions"] = init.instructions
+                    if init.serverInfo is not None:
+                        entity["serverInfo"] = init.serverInfo.model_dump(mode="json")
+                    if entity:
+                        server = [entity]
+
                     tools = [t.model_dump(mode="json") for t in (await session.list_tools()).tools]
 
                     prompts: list[dict[str, Any]] = []
@@ -91,7 +102,12 @@ async def _fetch(
                         except McpError:
                             pass
 
-                    return {"tool": tools, "prompt": prompts, "resource": resources}
+                    return {
+                        "tool": tools,
+                        "prompt": prompts,
+                        "resource": resources,
+                        "server": server,
+                    }
 
     try:
         return await asyncio.wait_for(run(), timeout=timeout)

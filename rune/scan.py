@@ -58,11 +58,23 @@ def _walk_strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
             yield from _walk_strings(sub, f"{path}[{i}]")
 
 
-# The order kinds are reported in: tools first, then prompts, then resources.
-KINDS = ("tool", "prompt", "resource")
+# The order kinds are reported in: tools, then prompts, resources, and last the
+# server's own metadata.
+KINDS = ("tool", "prompt", "resource", "server")
 
 
 def _entity_label(entity: dict[str, Any], kind: str, index: int) -> str:
+    # The server's name and title live nested under serverInfo, not at the top
+    # level, so read the label from there rather than duplicating it as a
+    # top-level string (which would then be scanned twice).
+    if kind == "server":
+        info = entity.get("serverInfo")
+        if isinstance(info, dict):
+            for key in ("name", "title"):
+                value = info.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+        return f"<{kind} #{index}>"
     # A resource has no name of its own in older servers, so fall back to the
     # URI it is addressed by, then the URI template, before a positional label.
     for key in ("name", "uri", "uriTemplate", "title"):

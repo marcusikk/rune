@@ -69,6 +69,14 @@ def _build_parser() -> argparse.ArgumentParser:
 # The manifest keys that carry each kind of listing.
 _MANIFEST_KEYS = {"tools": "tool", "prompts": "prompt", "resources": "resource"}
 
+# The MCP initialize-response fields a client feeds to its model, each mapped to
+# the JSON type it must have. "instructions" is documented as a hint the client
+# MAY add to the system prompt, and "serverInfo" carries the display name and
+# title. Both are trusted context a poisoned server can load before a single tool
+# is listed, so both are scanned. This mapping is the only definition of what
+# counts as server metadata; _server_entity reads it rather than repeating it.
+_SERVER_KEYS = {"instructions": str, "serverInfo": dict}
+
 
 # The conventional stand-in for stdin, so a listing can be piped straight in
 # (curl .../tools/list | rune --manifest -) without a temporary file.
@@ -173,6 +181,11 @@ def _envelope_groups(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     cannot discard a valid top-level listing. A malformed listing (a "tools"
     that is not a list) still raises through _entities, because that is a shape
     rune must not silently skip.
+
+    Server metadata ("instructions"/"serverInfo") is deliberately not unwrapped
+    here: it is read only from the object handed to _normalize, so a raw
+    JSON-RPC initialize reply with those fields hidden under "result" is still a
+    named error rather than a silent miss.
     """
     groups = _listing_groups(data)
     inner = data.get("result")
@@ -183,14 +196,52 @@ def _envelope_groups(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return groups
 
 
+def _server_entity(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull an MCP server's own model-facing metadata out of an initialize result.
+
+    Scopes to exactly the two fields a client reads, ``instructions`` (a string
+    the spec says MAY be added to the system prompt) and ``serverInfo`` (the
+    display name and title). Every other key in the response is left alone, so a
+    benign ``protocolVersion`` or a ``nextCursor`` on a listing is never mistaken
+    for server metadata. Widening this to "any key that is not a listing" is what
+    turns an honest response into a false finding, so the set stays closed.
+
+    A field that is present but the wrong type is an error naming the key, never
+    a skip. Dropping it would scan whatever else the file holds and print CLEAN
+    over metadata rune never read, the same silent miss _entities refuses for a
+    malformed listing. null is the one exception: it carries nothing to miss, so
+    it reads as absent.
+
+    Returns None when no field carries content, so neither a plain tools listing
+    nor an empty ``instructions`` string sprouts a phantom server entity. The
+    live path in client.py skips empty instructions for the same reason.
+    """
+    entity: dict[str, Any] = {}
+    for key, expected in _SERVER_KEYS.items():
+        value = data.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, expected):
+            raise ValueError(
+                f'"{key}" must be {_JSON_TYPES[expected]}, got {_typename(value)}'
+            )
+        if value:
+            # "" and {} hold no text to scan, so an entity built from them would
+            # be a row about nothing.
+            entity[key] = value
+    return entity or None
+
+
 def _normalize(data: Any) -> dict[str, list[dict[str, Any]]]:
     """Turn a manifest into entity lists keyed by kind.
 
     Accepts a bare tools array, a single tool object, or an object carrying any
     of "tools", "prompts" and "resources" (an exported MCP listing may hold more
-    than one). The kind keys let one file describe a whole server's surface. A
-    raw JSON-RPC response is accepted too: the listing under "result" is
-    unwrapped, so a captured "tools/list" reply scans without hand-editing.
+    than one), plus an initialize response whose own "instructions" and
+    "serverInfo" are scanned as a "server" entity beside any listings present.
+    The kind keys let one file describe a whole server's surface. A raw
+    JSON-RPC response is accepted too, for listings: the listing under "result"
+    is unwrapped, so a captured "tools/list" reply scans without hand-editing.
     """
     if isinstance(data, list):
         # A bare array has no key to name, so errors point at the file itself.
@@ -198,13 +249,28 @@ def _normalize(data: Any) -> dict[str, list[dict[str, Any]]]:
 
     if isinstance(data, dict):
         groups = _envelope_groups(data)
+        server = _server_entity(data)
+        if server is not None:
+            groups["server"] = [server]
         if groups:
             return groups
-        raise ValueError('manifest object has no "tools", "prompts" or "resources" list')
+        if "result" in data or "jsonrpc" in data:
+            # A saved raw JSON-RPC message hides the payload one level down under
+            # "result". Refusing loudly beats scanning the envelope's own keys
+            # and reporting a confident CLEAN on a file whose payload was skipped.
+            raise ValueError(
+                'this looks like a raw JSON-RPC message; scan the "result" '
+                "payload (the tools/list or initialize response body), not the "
+                "whole envelope"
+            )
+        raise ValueError(
+            'manifest object has nothing to scan: no "tools", "prompts" or '
+            '"resources" listing, and no server "instructions"/"serverInfo" text'
+        )
 
     raise ValueError(
-        'manifest must be a list of tools or an object with a '
-        '"tools", "prompts" or "resources" list'
+        'manifest must be a list of tools or an object with a "tools", '
+        '"prompts" or "resources" listing or server "instructions"'
     )
 
 

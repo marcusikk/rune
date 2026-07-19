@@ -68,6 +68,10 @@ def test_fingerprint_namespaces_prompts_and_resources() -> None:
     assert fingerprint("x", f, kind="prompt") != fingerprint("x", f, kind="tool")
     assert fingerprint("x", f, kind="resource") != fingerprint("x", f, kind="tool")
     assert fingerprint("x", f, kind="prompt") != fingerprint("x", f, kind="resource")
+    # A server entity named like a tool must not inherit the tool's approval
+    # either, so its findings live in their own namespace too.
+    assert fingerprint("x", f, kind="server") != fingerprint("x", f, kind="tool")
+    assert fingerprint("x", f, kind="server") != fingerprint("x", f, kind="prompt")
 
 
 def test_tool_fingerprint_is_unchanged_by_the_kind_feature() -> None:

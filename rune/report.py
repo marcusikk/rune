@@ -28,7 +28,7 @@ def _scanned_clause(results: list[ToolResult]) -> str:
     Only kinds that are present are named, so a tools-only scan reads exactly as
     it always has and a mixed scan spells out the extra surface it covered.
     """
-    counts = {kind: 0 for kind in ("tool", "prompt", "resource")}
+    counts = {kind: 0 for kind in ("tool", "prompt", "resource", "server")}
     for r in results:
         counts[r.kind] = counts.get(r.kind, 0) + 1
     parts = [f"{n} {kind}(s)" for kind, n in counts.items() if n]
@@ -85,17 +85,19 @@ def _entity_json(r: ToolResult) -> dict[str, Any]:
 def to_json(results: list[ToolResult], *, baselined: int = 0) -> dict[str, Any]:
     # Grouped by kind so the "tools" array keeps its existing shape and prompts
     # and resources appear alongside it rather than mixed in.
-    grouped = {kind: [] for kind in ("tool", "prompt", "resource")}
+    grouped = {kind: [] for kind in ("tool", "prompt", "resource", "server")}
     for r in results:
         grouped.setdefault(r.kind, []).append(_entity_json(r))
     return {
         "tools": grouped["tool"],
         "prompts": grouped["prompt"],
         "resources": grouped["resource"],
+        "servers": grouped["server"],
         "summary": {
             "tools": len(grouped["tool"]),
             "prompts": len(grouped["prompt"]),
             "resources": len(grouped["resource"]),
+            "servers": len(grouped["server"]),
             "flagged": sum(1 for r in results if r.findings),
             "findings": sum(len(r.findings) for r in results),
             "baselined": baselined,

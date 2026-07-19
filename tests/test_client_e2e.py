@@ -44,7 +44,11 @@ def test_poisoned_server_is_flagged() -> None:
     assert any(f.rule == "invisible-characters" for f in conceal)
     assert any(f.rule == "hidden-instructions" for f in by_name["list_files"].findings)
 
-    assert all(r.band == "HIGH" for r in results)
+    assert all(r.band == "HIGH" for r in results if r.kind == "tool")
+    # serverInfo is always returned by the handshake, so a clean-named server
+    # produces a clean server entity beside the poisoned tools.
+    assert by_name["poisoned"].kind == "server"
+    assert by_name["poisoned"].band == "CLEAN"
 
 
 def test_prompts_and_resources_are_listed_and_scanned() -> None:
@@ -84,3 +88,29 @@ def test_cli_stdio_path_flags_poisoned_server() -> None:
     )
     assert code == 1
     assert "data-exfiltration" in out.getvalue()
+
+
+def test_server_instructions_are_listed_and_scanned() -> None:
+    # A server returns its own instructions in the initialize handshake, and the
+    # spec says a client MAY add that string to its model's system prompt. rune
+    # must capture it over the real protocol and scan it like any other metadata.
+    groups, results = _scan_server("instructed_server.py")
+    assert len(groups["server"]) == 1
+    assert groups["server"][0]["serverInfo"]["name"] == "notes"
+
+    by_kind = {(r.kind, r.name): r for r in results}
+    server = by_kind[("server", "notes")]
+    assert any(f.rule == "concealment" for f in server.findings)
+    # The clean tool beside it stays clean: the finding is in the instructions.
+    assert all(r.findings == [] for (kind, _), r in by_kind.items() if kind == "tool")
+
+
+def test_cli_stdio_flags_poisoned_server_instructions() -> None:
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        ["--stdio", sys.executable, str(_FIXTURES / "instructed_server.py")],
+        out=out,
+        err=err,
+    )
+    assert code == 1
+    assert "server notes" in out.getvalue()

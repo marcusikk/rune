@@ -15,12 +15,12 @@ matched text itself IS included, so changing the flagged text does re-open a
 finding: an attacker cannot inherit a maintainer's approval by swapping the
 payload under a fingerprint that was accepted for different words.
 
-The kind (tool, prompt or resource) is folded in so a poisoned prompt named like
-an accepted tool does not inherit the tool's approval. It is folded in for
-prompts and resources only, never for tools, so every baseline written before
-rune scanned prompts and resources keeps suppressing its tool findings byte for
-byte and does not need to be regenerated. That is why _FORMAT_VERSION stays 1:
-no existing file is invalidated.
+The kind (tool, prompt, resource or server) is folded in so a poisoned prompt
+named like an accepted tool does not inherit the tool's approval. It is folded in
+for every non-tool kind, never for tools, so every baseline written before rune
+scanned prompts, resources and server metadata keeps suppressing its tool
+findings byte for byte and does not need to be regenerated. That is why
+_FORMAT_VERSION stays 1: no existing file is invalidated.
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ def fingerprint(name: str, finding: Finding, *, kind: str = "tool") -> str:
     keep its identity when unrelated edits shift it or change its context, and
     lose it only when the flagged text itself changes.
 
-    ``kind`` is prepended for prompts and resources so their findings live in a
-    separate namespace from a same-named tool. It is left out for tools, which
-    keeps a tool fingerprint identical to the ones every existing baseline was
-    written with.
+    ``kind`` is prepended for every non-tool kind so a prompt, resource or
+    server finding lives in a separate namespace from a same-named tool. It is
+    left out for tools, which keeps a tool fingerprint identical to the ones
+    every existing baseline was written with.
     """
     parts = (name, finding.rule, finding.path, finding.match)
     if kind != "tool":

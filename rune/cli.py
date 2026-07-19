@@ -51,11 +51,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="scan a live Streamable HTTP MCP server at URL (often ends in /mcp)",
     )
     parser.add_argument(
+        "--sse",
+        metavar="URL",
+        help="scan a live MCP server over the deprecated HTTP+SSE transport "
+        "at URL (often ends in /sse)",
+    )
+    parser.add_argument(
         "--header",
         action="append",
         default=[],
         metavar="NAME:VALUE",
-        help="send an extra HTTP header with --http, e.g. "
+        help="send an extra HTTP header with --http or --sse, e.g. "
         "'Authorization: Bearer TOKEN'; repeatable",
     )
     parser.add_argument(
@@ -420,21 +426,25 @@ def _parse_headers(values: list[str]) -> dict[str, str]:
     return headers
 
 
-def _check_http_url(url: str) -> None:
-    """Reject a URL rune cannot fetch, before any credential is attached."""
+def _check_http_url(url: str, opt: str) -> None:
+    """Reject a URL rune cannot fetch, before any credential is attached.
+
+    ``opt`` is the flag the URL came from (--http or --sse), so the message names
+    the option the user actually typed.
+    """
     from urllib.parse import urlsplit
 
     parts = urlsplit(url)
     if parts.scheme in ("http", "https"):
         if not parts.hostname:
-            raise ValueError(f"--http URL has no host: {url!r}")
+            raise ValueError(f"{opt} URL has no host: {url!r}")
         return
     if parts.netloc:
         # A real URL naming a transport rune cannot audit, e.g. ftp://host/x.
-        raise ValueError(f"--http only speaks http and https, got {parts.scheme!r}")
+        raise ValueError(f"{opt} only speaks http and https, got {parts.scheme!r}")
     # No authority to speak to. Covers a bare "example.com/mcp", a bare path,
     # and "file:///etc/passwd", which urlsplit reads as a scheme with no host.
-    raise ValueError(f"--http needs an http:// or https:// URL, got {url!r}")
+    raise ValueError(f"{opt} needs an http:// or https:// URL, got {url!r}")
 
 
 def _cleartext_warning(url: str, headers: dict[str, str]) -> str | None:
@@ -492,27 +502,32 @@ def main(
     args = parser.parse_args(argv)
 
     manifest = args.manifest_flag or args.manifest
-    sources = [bool(manifest), bool(args.stdio), bool(args.http)]
+    # --http and --sse are both remote URL transports and share the same URL
+    # validation, header, cleartext-warning and SARIF-URI handling.
+    remote_url = args.http or args.sse
+    remote_opt = "--http" if args.http else "--sse"
+    sources = [bool(manifest), bool(args.stdio), bool(args.http), bool(args.sse)]
     if sum(sources) != 1:
         print(
-            "rune: give exactly one of a manifest path, --stdio CMD, or --http URL",
+            "rune: give exactly one of a manifest path, --stdio CMD, --http URL, "
+            "or --sse URL",
             file=err,
         )
         return _EXIT_ERROR
 
-    if args.header and not args.http:
-        print("rune: --header only applies to --http", file=err)
+    if args.header and not remote_url:
+        print("rune: --header only applies to --http or --sse", file=err)
         return _EXIT_ERROR
 
     headers: dict[str, str] = {}
-    if args.http:
+    if remote_url:
         try:
-            _check_http_url(args.http)
+            _check_http_url(remote_url, remote_opt)
             headers = _parse_headers(args.header)
         except ValueError as exc:
             print(f"rune: {exc}", file=err)
             return _EXIT_ERROR
-        warning = _cleartext_warning(args.http, headers)
+        warning = _cleartext_warning(remote_url, headers)
         if warning:
             print(warning, file=err)
 
@@ -542,6 +557,14 @@ def main(
 
             try:
                 groups = fetch_metadata_http(args.http, headers=headers)
+            except LiveScanError as exc:
+                print(f"rune: live scan failed: {exc}", file=err)
+                return _EXIT_ERROR
+        elif args.sse:
+            from .client import LiveScanError, fetch_metadata_sse
+
+            try:
+                groups = fetch_metadata_sse(args.sse, headers=headers)
             except LiveScanError as exc:
                 print(f"rune: live scan failed: {exc}", file=err)
                 return _EXIT_ERROR
@@ -602,9 +625,9 @@ def main(
     if args.sarif:
         # A stdio or piped scan has no file on disk to point an alert at, so the
         # artifact URI is only set when a real manifest path was read, or when
-        # --http gave a genuine URI to name (credentials stripped out of it).
-        if args.http:
-            source_uri = _sarif_uri(args.http)
+        # --http/--sse gave a genuine URI to name (credentials stripped out of it).
+        if remote_url:
+            source_uri = _sarif_uri(remote_url)
         else:
             source_uri = manifest if manifest and manifest != _STDIN_ARG else None
         print(render_sarif(results, uri=source_uri, version=_VERSION), file=out)

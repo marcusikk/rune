@@ -6,10 +6,11 @@ reads a resource's body, or renders a prompt, so nothing the server can execute
 is triggered. The name, description and schema a listing returns are exactly the
 text a client's model reads as trusted context, which is the surface rune scans.
 
-Both transports run the identical listing pass in ``_collect``, so a remote
-Streamable HTTP server is scanned exactly as deeply as a local stdio one: the
-handshake ``instructions`` and ``serverInfo`` plus all three listings, not just
-the ``tools/list`` reply a hand-written curl would capture.
+All three transports (stdio, Streamable HTTP, and the deprecated HTTP+SSE) run
+the identical listing pass in ``_collect``, so a remote server is scanned exactly
+as deeply as a local stdio one: the handshake ``instructions`` and ``serverInfo``
+plus all three listings, not just the ``tools/list`` reply a hand-written curl
+would capture.
 
 Prompts and resources are only listed when the server advertises them in its
 capabilities, and a server that advertises but fails to list them is treated as
@@ -106,12 +107,14 @@ def _leaves(exc: BaseException) -> list[BaseException]:
     return [leaf for sub in inner for leaf in _leaves(sub)]
 
 
-def _http_reason(exc: Exception) -> str:
+def _http_reason(exc: Exception, *, path_hint: str = "/mcp") -> str:
     """Describe a transport failure without echoing request headers.
 
     An auth header value must never reach the terminal or a CI log, so the
     message is built from the status/class of the failure, not from a repr of
-    the request that carried it.
+    the request that carried it. ``path_hint`` is the endpoint suffix the
+    transport usually ends in, so a 404 points at ``/mcp`` for --http and ``/sse``
+    for --sse rather than guessing.
     """
     leaves = _leaves(exc)
     for leaf in leaves:
@@ -119,7 +122,10 @@ def _http_reason(exc: Exception) -> str:
         if status in (401, 403):
             return f"server returned HTTP {status}: the endpoint needs credentials (see --header)"
         if status == 404:
-            return "server returned HTTP 404: check the URL includes the MCP path (often /mcp)"
+            return (
+                "server returned HTTP 404: check the URL includes the MCP "
+                f"path (often {path_hint})"
+            )
         if status is not None:
             return f"server returned HTTP {status}"
 
@@ -150,6 +156,53 @@ async def _fetch_http(
                 write,
                 _session_id,
             ),
+            ClientSession(read, write) as session,
+        ):
+            return await _collect(session, McpError)
+
+    try:
+        return await asyncio.wait_for(run(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
+
+
+def fetch_metadata_sse(
+    url: str, *, headers: dict[str, str] | None = None, timeout: float = 20.0
+) -> dict[str, list[dict[str, Any]]]:
+    """List a remote MCP server's metadata over the deprecated HTTP+SSE transport.
+
+    The older two-endpoint ``/sse`` transport is still what many hosted servers
+    speak. Same return shape and the same read-only listing pass as the stdio and
+    Streamable HTTP paths, so such a server gets the full scan (handshake
+    instructions, tools, prompts and resources) instead of only the one reply a
+    captured curl can carry.
+    """
+    try:
+        return asyncio.run(_fetch_sse(url, headers or {}, timeout))
+    except LiveScanError:
+        raise
+    except Exception as exc:  # surfaced to the CLI as an operational error
+        raise LiveScanError(_http_reason(exc, path_hint="/sse")) from exc
+
+
+async def _fetch_sse(
+    url: str, headers: dict[str, str], timeout: float
+) -> dict[str, list[dict[str, Any]]]:
+    try:
+        from mcp import ClientSession, McpError
+        from mcp.client.sse import sse_client
+    except ImportError as exc:
+        raise LiveScanError(
+            "live scanning needs the mcp package: pip install 'rune-scan[live]'"
+        ) from exc
+
+    async def run() -> dict[str, list[dict[str, Any]]]:
+        # sse_client yields (read, write); it holds a long-lived GET stream open
+        # for server->client messages, so the connect timeout and the overall
+        # wait_for below are what bound a server that accepts the socket but never
+        # sends its endpoint event.
+        async with (
+            sse_client(url, headers=headers or None, timeout=timeout) as (read, write),
             ClientSession(read, write) as session,
         ):
             return await _collect(session, McpError)

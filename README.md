@@ -161,11 +161,20 @@ and `serverInfo`, then lists tools, prompts, and resources. Piping in a single
 `tools/list` reply (above) can only ever show you the tools. It still never calls
 a tool, renders a prompt, or reads a resource body.
 
-A header value is only ever sent, never printed: rune does not echo it back in an
-error, and `--sarif` strips any userinfo and query string off the URL before
-writing it into the log. If you send headers over plain `http` to anything but
-localhost, rune warns on stderr that the credential is crossing the network in
-the clear, and continues.
+Some hosted servers still speak the older HTTP+SSE transport (the two-endpoint
+style whose connection URL usually ends in `/sse`) rather than Streamable HTTP.
+Point `--sse` at that endpoint and rune opens it directly, with the same
+full-depth scan and the same `--header`:
+
+```
+rune --sse https://mcp.example.com/sse --header "Authorization: Bearer $TOKEN"
+```
+
+A header value is only ever sent, never printed, on either transport: rune does
+not echo it back in an error, and `--sarif` strips any userinfo and query string
+off the URL before writing it into the log. If you send headers over plain `http`
+to anything but localhost, rune warns on stderr that the credential is crossing
+the network in the clear, and continues.
 
 Machine-readable output and CI:
 
@@ -308,17 +317,19 @@ secret itself is what's being sent, and where.
 
 rune is a signal for human review, not a proof of safety.
 
-- It scans live servers over stdio and over Streamable HTTP (`--http`), plus
-  saved manifests, including the raw JSON-RPC `tools/list` reply an HTTP server
-  returns, whether that reply is a JSON body or a `text/event-stream` (it reads
-  the SSE `data:` frames). It does not speak the older HTTP+SSE transport
-  (the deprecated two-endpoint `/sse` style) as a client; for such a server,
-  capture the `tools/list` (and `prompts/list`, `resources/list`) reply and scan
-  it, or pipe it in with `-`.
-- `--http` follows redirects, and the HTTP client drops an `Authorization`
-  header if a server redirects it to another origin. A custom credential header
-  such as `X-Api-Key` is not covered by that rule, so point `--http` at an
-  endpoint you got from the vendor rather than one a third party handed you.
+- It scans live servers over stdio, over Streamable HTTP (`--http`), and over the
+  older two-endpoint HTTP+SSE transport (`--sse`), plus saved manifests,
+  including the raw JSON-RPC `tools/list` reply an HTTP server returns, whether
+  that reply is a JSON body or a `text/event-stream` (it reads the SSE `data:`
+  frames). For a transport rune does not open itself, capture the `tools/list`
+  (and `prompts/list`, `resources/list`) reply and scan it, or pipe it in with
+  `-`, remembering that a captured reply cannot carry the handshake
+  `instructions`.
+- `--http` and `--sse` follow redirects, and the HTTP client drops an
+  `Authorization` header if a server redirects it to another origin. A custom
+  credential header such as `X-Api-Key` is not covered by that rule, so point the
+  scan at an endpoint you got from the vendor rather than one a third party
+  handed you.
 - It reads listing metadata for tools, prompts, and resources, plus the server's
   own `instructions` and `serverInfo` from the handshake. It never calls a tool,
   renders a prompt, or reads a resource's body, so nothing the server can execute

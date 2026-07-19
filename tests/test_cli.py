@@ -1398,3 +1398,61 @@ def test_sarif_uri_strips_credentials_from_the_url() -> None:
     assert _sarif_uri("https://u:pw@example.com/mcp?api_key=s3cret") == "https://example.com/mcp"
     assert _sarif_uri("http://127.0.0.1:8931/mcp") == "http://127.0.0.1:8931/mcp"
     assert _sarif_uri("https://example.com/mcp") == "https://example.com/mcp"
+
+
+# --sse argument handling. It shares --http's URL, header, cleartext-warning and
+# SARIF-URI code, so these cover only that the shared path is reached with --sse
+# and names the right flag; the transport itself is proved end-to-end against a
+# real server in test_sse_e2e.py.
+
+
+def test_sse_and_manifest_together_is_an_error(tmp_path: Path) -> None:
+    manifest = _write(tmp_path, [{"name": "add", "description": "Add numbers."}])
+    code, _, err = _run([manifest, "--sse", "https://example.com/sse"])
+    assert code == 2
+    assert "exactly one" in err
+
+
+def test_sse_and_http_together_is_an_error() -> None:
+    code, _, err = _run(["--sse", "https://example.com/sse", "--http", "https://example.com/mcp"])
+    assert code == 2
+    assert "exactly one" in err
+
+
+def test_sse_non_http_scheme_is_refused() -> None:
+    code, _, err = _run(["--sse", "ftp://example.com/sse"])
+    assert code == 2
+    assert "only speaks http and https" in err
+
+
+def test_sse_url_without_a_usable_authority_names_sse() -> None:
+    # The error must name the flag the user actually typed, not --http.
+    code, _, err = _run(["--sse", "example.com/sse"])
+    assert code == 2
+    assert "--sse needs an http:// or https:// URL" in err
+
+
+def test_http_reason_404_hint_names_the_transport_path() -> None:
+    # Pins the helper's default (/mcp) and that an explicit path_hint is honored.
+    # It cannot see whether fetch_metadata_sse actually passes path_hint="/sse",
+    # so the call site is covered end-to-end by test_sse_e2e's 404 test instead.
+    from rune.client import _http_reason
+
+    class _Resp:
+        status_code = 404
+
+    class _Err(Exception):
+        response = _Resp()
+
+    assert "/mcp" in _http_reason(_Err())
+    assert "/sse" in _http_reason(_Err(), path_hint="/sse")
+
+
+def test_header_with_sse_is_accepted_as_a_remote_source() -> None:
+    # --header is valid with --sse, so this must fail on the unreachable URL
+    # (an operational error), not on "--header only applies to ...".
+    code, _, err = _run(
+        ["--sse", "http://127.0.0.1:9/sse", "--header", "Authorization: Bearer x"]
+    )
+    assert code == 2
+    assert "only applies to" not in err

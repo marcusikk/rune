@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
-from .baseline import fingerprint
+from .baseline import BaselineEntry, fingerprint
 from .models import Finding, ToolResult
 from .scan import render_visible
 
@@ -65,6 +66,30 @@ def render_text(results: list[ToolResult], *, color: bool = False, baselined: in
     return "\n".join(lines)
 
 
+def render_stale_notice(stale: Sequence[BaselineEntry]) -> str:
+    """Name the baseline entries this scan did not match, and how to act on them.
+
+    This goes to stderr in every output mode rather than into the report body. It
+    is a statement about the baseline file, not about the scanned server, so it
+    must not land in the middle of piped --json or --sarif, and it must still be
+    visible in those modes, which a line in the text report would not be.
+
+    The wording claims only what rune actually knows. An entry can match nothing
+    because the finding was fixed, and it can match nothing because this scan
+    covered less than the one the baseline was written from. rune cannot tell
+    those apart, so it reports the fact and leaves the judgement to the reader.
+    """
+    lines = [
+        f"rune: {len(stale)} baseline entry(s) matched nothing in this scan:"
+    ]
+    lines.extend(f"  {entry.label}" for entry in stale)
+    lines.append(
+        "rune: prune them by re-running with --write-baseline, or ignore this if "
+        "this scan covered less than the baseline was written from"
+    )
+    return "\n".join(lines)
+
+
 def _entity_json(r: ToolResult) -> dict[str, Any]:
     return {
         "name": r.name,
@@ -84,7 +109,12 @@ def _entity_json(r: ToolResult) -> dict[str, Any]:
     }
 
 
-def to_json(results: list[ToolResult], *, baselined: int = 0) -> dict[str, Any]:
+def to_json(
+    results: list[ToolResult],
+    *,
+    baselined: int = 0,
+    stale: Sequence[BaselineEntry] = (),
+) -> dict[str, Any]:
     # Grouped by kind so the "tools" array keeps its existing shape and prompts
     # and resources appear alongside it rather than mixed in.
     grouped = {kind: [] for kind in ("tool", "prompt", "resource", "server")}
@@ -95,6 +125,11 @@ def to_json(results: list[ToolResult], *, baselined: int = 0) -> dict[str, Any]:
         "prompts": grouped["prompt"],
         "resources": grouped["resource"],
         "servers": grouped["server"],
+        # The stale entries in machine-readable form, so a team can prune a
+        # baseline from a script rather than reading them off stderr. Each one
+        # carries the same fields the baseline file recorded, so an entry here
+        # can be matched straight back to the line it came from.
+        "staleBaseline": [entry.as_dict() for entry in stale],
         "summary": {
             "tools": len(grouped["tool"]),
             "prompts": len(grouped["prompt"]),
@@ -103,12 +138,20 @@ def to_json(results: list[ToolResult], *, baselined: int = 0) -> dict[str, Any]:
             "flagged": sum(1 for r in results if r.findings),
             "findings": sum(len(r.findings) for r in results),
             "baselined": baselined,
+            "staleBaseline": len(stale),
         },
     }
 
 
-def render_json(results: list[ToolResult], *, baselined: int = 0) -> str:
-    return json.dumps(to_json(results, baselined=baselined), indent=2, ensure_ascii=True)
+def render_json(
+    results: list[ToolResult],
+    *,
+    baselined: int = 0,
+    stale: Sequence[BaselineEntry] = (),
+) -> str:
+    return json.dumps(
+        to_json(results, baselined=baselined, stale=stale), indent=2, ensure_ascii=True
+    )
 
 
 # --- SARIF 2.1.0 -------------------------------------------------------------

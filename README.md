@@ -214,6 +214,41 @@ Baseline files written before rune scanned prompts and resources keep working
 unchanged: a tool finding's identity is byte-for-byte what it always was, so
 there is nothing to regenerate.
 
+#### Stale entries
+
+A baseline entry is a standing approval that lives in your repo. When the
+finding it accepted is gone, because the vendor fixed the description or the tool
+was removed, the entry stays behind and nothing reviews it again. That is worth
+knowing about: the approval covers an exact piece of text, so if that text ever
+comes back, a server rolls back, a description is restored, a removed tool is
+re-added, rune suppresses it once more without a human looking at it. Stale
+entries also make a baseline diff unreadable in review, since a live approval and
+a dead one are indistinguishable on disk.
+
+So a `--baseline` run names the entries that matched nothing, on stderr:
+
+```
+rune: 1 baseline entry(s) matched nothing in this scan:
+  tool fetch  data-exfiltration  description
+rune: prune them by re-running with --write-baseline, or ignore this if this scan covered less than the baseline was written from
+```
+
+This is advisory by default and does not change the exit code, because rune
+cannot tell a fixed finding from a scan that simply covered less than the one the
+baseline came from. Scan only the tools when the baseline also holds prompt
+findings and every prompt entry is reported, correctly, as having matched
+nothing. Pass `--fail-on-stale-baseline` to make it exit `1` once you are scanning
+the same surface each time, which is the normal case in CI:
+
+```
+rune --manifest tools.json --baseline rune-baseline.json --fail-on-stale-baseline
+```
+
+Prune by re-running `--write-baseline` over the current scan and committing the
+diff. `--json` carries the same entries under `staleBaseline`, with a count in
+`summary.staleBaseline`, for pruning from a script. The notice is on stderr in
+every mode, so it never lands inside piped `--json` or `--sarif` output.
+
 ## What it looks for
 
 | Rule | Severity | What it catches |
@@ -299,7 +334,8 @@ rune is a signal for human review, not a proof of safety.
 ## Exit codes
 
 - `0` nothing at or above `--fail-on` (default `medium`)
-- `1` at least one finding at or above `--fail-on`
+- `1` at least one finding at or above `--fail-on`, or, with
+  `--fail-on-stale-baseline`, a baseline entry that matched nothing
 - `2` operational error (bad manifest, server would not start, endpoint
   unreachable or refused the credentials)
 

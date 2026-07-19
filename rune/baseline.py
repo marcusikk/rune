@@ -21,12 +21,21 @@ for every non-tool kind, never for tools, so every baseline written before rune
 scanned prompts, resources and server metadata keeps suppressing its tool
 findings byte for byte and does not need to be regenerated. That is why
 _FORMAT_VERSION stays 1: no existing file is invalidated.
+
+An entry that matches nothing in a scan is reported as stale rather than left
+silent. A baseline entry is a standing approval that lives in the repo, and one
+whose finding is gone is an approval nobody is reviewing any more: if that exact
+text ever comes back, a server rolls back, a vendor restores a description, a
+removed tool is re-added, rune suppresses it again without a human ever looking.
+Reporting stale entries is what lets a maintainer prune them, and it makes a
+baseline diff readable, since a live approval and a fossil look identical on disk.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from .models import Finding, ToolResult
@@ -82,8 +91,59 @@ def build_baseline(results: list[ToolResult]) -> dict[str, Any]:
     return {"version": _FORMAT_VERSION, "findings": entries}
 
 
-def load_fingerprints(path: str) -> set[str]:
-    """Read a baseline file and return the set of accepted fingerprints."""
+@dataclass(frozen=True)
+class BaselineEntry:
+    """One recorded approval, as read back off disk.
+
+    Only ``fingerprint`` is load-bearing; it alone decides what gets suppressed.
+    The rest is what the file wrote down about the finding at approval time, kept
+    so a stale entry can be named in a way a human can act on. Those fields are
+    optional on purpose: the loader has never required them, and tightening that
+    now would reject baselines already committed by existing users.
+    """
+
+    fingerprint: str
+    kind: str = ""
+    target: str = ""
+    rule: str = ""
+    path: str = ""
+
+    @property
+    def label(self) -> str:
+        """A human-readable name for this entry, degrading to its fingerprint.
+
+        A file written by ``--write-baseline`` always carries the descriptive
+        fields, so this reads as "tool fetch  data-exfiltration  description". A
+        hand-written entry may carry only a fingerprint, and naming it by its id
+        is still more use than dropping it from the report.
+        """
+        if not (self.kind or self.target or self.rule):
+            return f"fingerprint {self.fingerprint[:12]}"
+        located = f"{self.kind} {self.target}  {self.rule}".strip()
+        return f"{located}  {self.path}" if self.path else located
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "target": self.target,
+            "rule": self.rule,
+            "path": self.path,
+            "fingerprint": self.fingerprint,
+        }
+
+
+def _text(entry: dict[str, Any], key: str) -> str:
+    value = entry.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def load_baseline(path: str) -> list[BaselineEntry]:
+    """Read a baseline file into its entries, in file order.
+
+    Validation is exactly what it has always been: the document shape, the
+    version, and a non-empty fingerprint on every entry. The descriptive fields
+    are read opportunistically, never required.
+    """
     with open(path, encoding="utf-8") as fh:
         try:
             data = json.load(fh)
@@ -101,15 +161,54 @@ def load_fingerprints(path: str) -> set[str]:
     if not isinstance(findings, list):
         raise BaselineError('baseline "findings" must be a list')
 
-    accepted: set[str] = set()
+    entries: list[BaselineEntry] = []
     for entry in findings:
         if not isinstance(entry, dict):
             raise BaselineError("each baseline entry must be an object")
         fp = entry.get("fingerprint")
         if not isinstance(fp, str) or not fp:
             raise BaselineError("a baseline entry is missing its fingerprint")
-        accepted.add(fp)
-    return accepted
+        entries.append(
+            BaselineEntry(
+                fingerprint=fp,
+                kind=_text(entry, "kind"),
+                target=_text(entry, "target"),
+                rule=_text(entry, "rule"),
+                path=_text(entry, "path"),
+            )
+        )
+    return entries
+
+
+def current_fingerprints(results: list[ToolResult]) -> set[str]:
+    """Every finding this scan produced, by fingerprint.
+
+    Call this BEFORE apply_baseline. That function deletes exactly the findings
+    the baseline matched, so taking the set afterwards would make every accepted
+    entry look like it matched nothing, which is the precise opposite of stale.
+    """
+    return {
+        fingerprint(r.name, f, kind=r.kind) for r in results for f in r.findings
+    }
+
+
+def stale_entries(
+    entries: list[BaselineEntry], present: set[str]
+) -> list[BaselineEntry]:
+    """The recorded approvals no current finding claimed, in file order.
+
+    Deduplicated by fingerprint, so a file that lists the same approval twice is
+    reported once. ``present`` must come from current_fingerprints on results
+    that have not been filtered yet.
+    """
+    stale: list[BaselineEntry] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if entry.fingerprint in present or entry.fingerprint in seen:
+            continue
+        seen.add(entry.fingerprint)
+        stale.append(entry)
+    return stale
 
 
 def apply_baseline(results: list[ToolResult], accepted: set[str]) -> int:

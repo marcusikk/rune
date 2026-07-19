@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 from .models import Severity
-from .report import render_json, render_sarif, render_text
+from .report import render_json, render_sarif, render_stale_notice, render_text
 from .scan import scan_targets
+
+if TYPE_CHECKING:
+    from .baseline import BaselineEntry
 
 _VERSION = "0.1.0"
 
@@ -70,6 +73,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--write-baseline",
         metavar="FILE",
         help="write the current findings to FILE as a baseline and exit 0",
+    )
+    parser.add_argument(
+        "--fail-on-stale-baseline",
+        action="store_true",
+        help="also exit 1 when a --baseline entry matched nothing in this scan",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument(
@@ -512,6 +520,10 @@ def main(
         print("rune: use --baseline or --write-baseline, not both", file=err)
         return _EXIT_ERROR
 
+    if args.fail_on_stale_baseline and not args.baseline:
+        print("rune: --fail-on-stale-baseline only applies to --baseline", file=err)
+        return _EXIT_ERROR
+
     if args.json and args.sarif:
         print("rune: use --json or --sarif, not both", file=err)
         return _EXIT_ERROR
@@ -563,18 +575,29 @@ def main(
         return _EXIT_CLEAN
 
     baselined = 0
+    stale: list[BaselineEntry] = []
     if args.baseline:
-        from .baseline import BaselineError, apply_baseline, load_fingerprints
+        from .baseline import (
+            BaselineError,
+            apply_baseline,
+            current_fingerprints,
+            load_baseline,
+            stale_entries,
+        )
 
         try:
-            accepted = load_fingerprints(args.baseline)
+            entries = load_baseline(args.baseline)
         except FileNotFoundError:
             print(f"rune: no such baseline: {args.baseline}", file=err)
             return _EXIT_ERROR
         except (BaselineError, OSError) as exc:
             print(f"rune: cannot read baseline: {exc}", file=err)
             return _EXIT_ERROR
-        baselined = apply_baseline(results, accepted)
+        # Taken before apply_baseline, which deletes exactly the findings the
+        # baseline matched. Reading the scan afterwards would report every
+        # working approval as stale.
+        stale = stale_entries(entries, current_fingerprints(results))
+        baselined = apply_baseline(results, {e.fingerprint for e in entries})
 
     if args.sarif:
         # A stdio or piped scan has no file on disk to point an alert at, so the
@@ -586,10 +609,22 @@ def main(
             source_uri = manifest if manifest and manifest != _STDIN_ARG else None
         print(render_sarif(results, uri=source_uri, version=_VERSION), file=out)
     elif args.json:
-        print(render_json(results, baselined=baselined), file=out)
+        print(render_json(results, baselined=baselined, stale=stale), file=out)
     else:
         print(render_text(results, color=_want_color(args, out), baselined=baselined), file=out)
 
+    # After the report, so a reader takes in the findings before a note about
+    # the baseline file's own bookkeeping. On stderr in every mode, so it never
+    # lands inside piped --json or --sarif but is still seen in those modes.
+    if stale:
+        print(render_stale_notice(stale), file=err)
+
     threshold = Severity.from_label(args.fail_on)
     hit = any(f.severity >= threshold for r in results for f in r.findings)
-    return _EXIT_FINDING if hit else _EXIT_CLEAN
+    if hit:
+        return _EXIT_FINDING
+    # Opt-in, and only ever able to turn a 0 into a 1: a stale approval is a
+    # hygiene problem worth blocking on if a team chooses to, never a finding.
+    if stale and args.fail_on_stale_baseline:
+        return _EXIT_FINDING
+    return _EXIT_CLEAN

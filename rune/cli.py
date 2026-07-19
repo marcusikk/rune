@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "manifest",
         nargs="?",
         help="path to a tools manifest (JSON array of tools or a "
-        "{\"tools\": [...]} object)",
+        "{\"tools\": [...]} object); - reads it from stdin",
     )
     parser.add_argument(
         "--manifest",
@@ -70,9 +70,22 @@ def _build_parser() -> argparse.ArgumentParser:
 _MANIFEST_KEYS = {"tools": "tool", "prompts": "prompt", "resources": "resource"}
 
 
-def _load_manifest(path: str) -> dict[str, list[dict[str, Any]]]:
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
+# The conventional stand-in for stdin, so a listing can be piped straight in
+# (curl .../tools/list | rune --manifest -) without a temporary file.
+_STDIN_ARG = "-"
+
+
+def _load_manifest(path: str, stdin: TextIO) -> dict[str, list[dict[str, Any]]]:
+    if path == _STDIN_ARG:
+        text = stdin.read()
+        if not text.strip():
+            # Empty stdin is an operational error, not a clean scan: a gate that
+            # reports 0 findings on no input at all is the wrong kind of quiet.
+            raise ValueError("no JSON on stdin")
+        data = json.loads(text)
+    else:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
     return _normalize(data)
 
 
@@ -124,26 +137,69 @@ def _entities(value: Any, label: str) -> list[dict[str, Any]]:
     return value
 
 
+def _listing_groups(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Extract the entity lists a single manifest object names directly.
+
+    Handles the "tools"/"prompts"/"resources" keys and the bare single-tool
+    shape. Returns an empty mapping when the object names no listing of its own,
+    leaving it to the caller to try unwrapping a JSON-RPC "result" envelope.
+    """
+    present = [key for key in _MANIFEST_KEYS if key in data]
+    if present:
+        return {
+            _MANIFEST_KEYS[key]: _entities(data[key], f'"{key}"')
+            for key in present
+        }
+    if any(k in data for k in ("name", "description", "inputSchema")):
+        return {"tool": [data]}
+    return {}
+
+
+def _envelope_groups(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Collect every listing an object carries, directly or under "result".
+
+    An MCP "tools/list" reply is a JSON-RPC envelope: the real listing sits
+    under "result", beside "jsonrpc" and "id". This merges the object's own
+    listings with those inside a "result" envelope, recursing so a
+    doubly-wrapped "result".result" is still reached. The union is taken per
+    kind rather than letting either side suppress the other: a spec-compliant
+    client reads "result", so a clean top-level decoy beside a poisoned "result"
+    must not hide the poison. Top-level lists are copied before extending so a
+    merge never mutates the caller's data in place.
+
+    This never raises on the "no listing anywhere" case; that verdict belongs to
+    the single caller, which can then point the error at the whole file. A
+    "result" object that names no listing of its own contributes nothing and so
+    cannot discard a valid top-level listing. A malformed listing (a "tools"
+    that is not a list) still raises through _entities, because that is a shape
+    rune must not silently skip.
+    """
+    groups = _listing_groups(data)
+    inner = data.get("result")
+    if isinstance(inner, dict):
+        groups = {kind: list(entities) for kind, entities in groups.items()}
+        for kind, entities in _envelope_groups(inner).items():
+            groups.setdefault(kind, []).extend(entities)
+    return groups
+
+
 def _normalize(data: Any) -> dict[str, list[dict[str, Any]]]:
     """Turn a manifest into entity lists keyed by kind.
 
     Accepts a bare tools array, a single tool object, or an object carrying any
     of "tools", "prompts" and "resources" (an exported MCP listing may hold more
-    than one). The kind keys let one file describe a whole server's surface.
+    than one). The kind keys let one file describe a whole server's surface. A
+    raw JSON-RPC response is accepted too: the listing under "result" is
+    unwrapped, so a captured "tools/list" reply scans without hand-editing.
     """
     if isinstance(data, list):
         # A bare array has no key to name, so errors point at the file itself.
         return {"tool": _entities(data, "manifest")}
 
     if isinstance(data, dict):
-        present = [key for key in _MANIFEST_KEYS if key in data]
-        if present:
-            return {
-                _MANIFEST_KEYS[key]: _entities(data[key], f'"{key}"')
-                for key in present
-            }
-        if any(k in data for k in ("name", "description", "inputSchema")):
-            return {"tool": [data]}
+        groups = _envelope_groups(data)
+        if groups:
+            return groups
         raise ValueError('manifest object has no "tools", "prompts" or "resources" list')
 
     raise ValueError(
@@ -162,11 +218,13 @@ def main(
     argv: list[str] | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
+    inp: TextIO | None = None,
 ) -> int:
     import sys
 
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
+    inp = inp if inp is not None else sys.stdin
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -189,7 +247,7 @@ def main(
                 print(f"rune: live scan failed: {exc}", file=err)
                 return _EXIT_ERROR
         else:
-            groups = _load_manifest(manifest)
+            groups = _load_manifest(manifest, inp)
     except FileNotFoundError:
         print(f"rune: no such file: {manifest}", file=err)
         return _EXIT_ERROR

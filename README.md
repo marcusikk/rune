@@ -47,8 +47,10 @@ pip install "rune-scan[live]"
 ## Use
 
 Scan a saved manifest. This can be a bare JSON array of tools, an MCP
-`tools/list` response shaped as `{"tools": [...]}`, or an object that also
-carries `prompts` and `resources` so one file describes a whole server:
+`tools/list` response shaped as `{"tools": [...]}`, the raw JSON-RPC reply that
+wraps it (`{"jsonrpc": "2.0", "id": 1, "result": {"tools": [...]}}`), or an
+object that also carries `prompts` and `resources` so one file describes a whole
+server:
 
 ```
 rune --manifest tools.json
@@ -67,6 +69,24 @@ A single entry can stand in for a one-element list (`{"prompts": {...}}`), and
 exits `2` naming the key, rather than scanning the rest of the file and
 reporting CLEAN. rune will not skip metadata it cannot read: a listing quietly
 passed over is a poisoned prompt the gate told you was safe.
+
+Pass `-` to read the manifest from stdin, so a captured `tools/list` reply pipes
+straight into the scan without a temporary file. rune unwraps the JSON-RPC
+envelope for you, so the response body goes in as the server returned it:
+
+```
+curl -sX POST https://example.com/mcp \
+  -H 'accept: application/json' -H 'content-type: application/json' \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | rune -
+```
+
+This works when the server answers with a JSON body. rune does not open the
+HTTP/SSE transport itself and does not parse SSE `data:` frames, so an SSE-only
+server needs its framing stripped first.
+
+If a reply carries listings both at the top level and under `result`, rune scans
+both. A spec-compliant client reads `result`, so a clean top-level listing is
+never allowed to hide a poisoned one beside it under `result`.
 
 Scan a live stdio server by launching it and listing its tools, prompts, and
 resources (metadata only, never a tool call):
@@ -167,9 +187,11 @@ secret itself is what's being sent, and where.
 
 rune is a signal for human review, not a proof of safety.
 
-- It scans stdio servers and saved manifests. HTTP/SSE transports are not
-  supported yet; export their `tools/list` (and `prompts/list`,
-  `resources/list`) responses to a manifest and scan that.
+- It scans stdio servers and saved manifests, including the raw JSON-RPC
+  `tools/list` reply an HTTP server returns. It does not speak the HTTP or SSE
+  transport itself and does not parse SSE `data:` frames, so for those servers
+  capture the `tools/list` (and `prompts/list`, `resources/list`) JSON reply and
+  scan it, or pipe it in with `-`.
 - It reads listing metadata for tools, prompts, and resources. It never calls a
   tool, renders a prompt, or reads a resource's body, so nothing the server can
   execute is triggered. Resource contents fetched at runtime are out of scope.

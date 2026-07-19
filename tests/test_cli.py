@@ -1093,3 +1093,121 @@ def test_server_finding_can_be_baselined(tmp_path: Path) -> None:
     code, out, _ = _run([manifest, "--baseline", str(baseline)])
     assert code == 0
     assert "1 baselined" in out
+
+
+# --http argument handling. The transport itself is proved end-to-end against a
+# real server in test_http_e2e.py; these are the paths that must fail before a
+# single byte, and before any credential, goes anywhere.
+
+
+def test_http_and_manifest_together_is_an_error(tmp_path: Path) -> None:
+    manifest = _write(tmp_path, [{"name": "add", "description": "Add numbers."}])
+    code, _, err = _run([manifest, "--http", "https://example.com/mcp"])
+    assert code == 2
+    assert "exactly one" in err
+
+
+def test_http_and_stdio_together_is_an_error() -> None:
+    code, _, err = _run(["--http", "https://example.com/mcp", "--stdio", "server"])
+    assert code == 2
+    assert "exactly one" in err
+
+
+def test_no_source_at_all_is_still_an_error() -> None:
+    code, _, err = _run([])
+    assert code == 2
+    assert "exactly one" in err
+
+
+@pytest.mark.parametrize("url", ["ftp://example.com/mcp", "gopher://example.com"])
+def test_non_http_scheme_is_refused(url: str) -> None:
+    # A security tool must not be talked into fetching a scheme it cannot audit.
+    code, _, err = _run(["--http", url])
+    assert code == 2
+    assert "only speaks http and https" in err
+
+
+@pytest.mark.parametrize(
+    "url",
+    # A bare host, a bare path, a host:port that urlsplit reads as a scheme, and
+    # file://, which has a scheme but no host to connect to.
+    ["example.com/mcp", "localhost:8000/mcp", "/mcp", "file:///etc/passwd"],
+)
+def test_url_without_a_usable_http_authority_is_refused(url: str) -> None:
+    code, _, err = _run(["--http", url])
+    assert code == 2
+    assert "http:// or https:// URL" in err
+
+
+def test_empty_http_url_counts_as_no_source() -> None:
+    # An empty --http is an unset one, so it falls to the "pick a source" error
+    # rather than being reported as a malformed URL.
+    code, _, err = _run(["--http", ""])
+    assert code == 2
+    assert "exactly one" in err
+
+
+def test_http_url_with_no_host_is_refused() -> None:
+    code, _, err = _run(["--http", "http://"])
+    assert code == 2
+    assert "no host" in err
+
+
+def test_header_without_http_is_an_error() -> None:
+    code, _, err = _run(["--header", "Authorization: Bearer x", "--stdio", "server"])
+    assert code == 2
+    assert "--header only applies to --http" in err
+
+
+def test_malformed_header_never_echoes_its_value() -> None:
+    # The likeliest content of a --header is a token. A parse error must not put
+    # it in the terminal or a CI log, so the message quotes nothing.
+    code, _, err = _run(["--http", "https://example.com/mcp", "--header", "Bearer sup3rs3cret"])
+    assert code == 2
+    assert "sup3rs3cret" not in err
+    assert 'expected "Name: value"' in err
+
+
+def test_header_value_may_contain_colons() -> None:
+    from rune.cli import _parse_headers
+
+    parsed = _parse_headers(["X-Origin: https://example.com:8443/path", "A:b"])
+    assert parsed == {"X-Origin": "https://example.com:8443/path", "A": "b"}
+
+
+def test_header_with_empty_name_is_refused() -> None:
+    from rune.cli import _parse_headers
+
+    with pytest.raises(ValueError):
+        _parse_headers([": value"])
+
+
+def test_cleartext_credential_warning() -> None:
+    from rune.cli import _cleartext_warning
+
+    creds = {"Authorization": "Bearer x"}
+    # Plain http to a real host puts the token on the wire, so say so.
+    assert _cleartext_warning("http://example.com/mcp", creds) is not None
+    # https is fine, loopback never leaves the machine, and no header means no
+    # credential to expose.
+    assert _cleartext_warning("https://example.com/mcp", creds) is None
+    assert _cleartext_warning("http://127.0.0.1:8000/mcp", creds) is None
+    assert _cleartext_warning("http://localhost:8000/mcp", creds) is None
+    assert _cleartext_warning("http://example.com/mcp", {}) is None
+
+
+def test_cleartext_warning_never_prints_the_secret() -> None:
+    from rune.cli import _cleartext_warning
+
+    warning = _cleartext_warning("http://example.com/mcp", {"Authorization": "Bearer s3cret"})
+    assert "s3cret" not in warning
+
+
+def test_sarif_uri_strips_credentials_from_the_url() -> None:
+    # A SARIF log gets uploaded and kept. A token that rode in the query string
+    # or in userinfo must not be written into it beside the findings.
+    from rune.cli import _sarif_uri
+
+    assert _sarif_uri("https://u:pw@example.com/mcp?api_key=s3cret") == "https://example.com/mcp"
+    assert _sarif_uri("http://127.0.0.1:8931/mcp") == "http://127.0.0.1:8931/mcp"
+    assert _sarif_uri("https://example.com/mcp") == "https://example.com/mcp"

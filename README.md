@@ -94,9 +94,11 @@ curl -sN https://example.com/mcp \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | rune -
 ```
 
-rune still does not open the HTTP or SSE transport itself. It reads a reply you
-captured or piped in, whether that reply is a bare JSON body or an event stream.
-Keep-alive comments and server notifications in the stream are skipped; if the
+Piping a captured reply stays useful when you cannot reach the server yourself,
+or want to gate on a manifest checked into a repo. It reads a bare JSON body or
+an event stream. Note that it scans only what the reply carries: for the full
+surface, including the handshake `instructions`, use `--http` and let rune
+connect. Keep-alive comments and server notifications in the stream are skipped; if the
 stream somehow carries more than one JSON-RPC reply, rune stops and asks you to
 scan the single `tools/list` reply rather than guessing which one to read.
 
@@ -138,6 +140,32 @@ resources (metadata only, never a tool call):
 rune --stdio python my_server.py
 rune --stdio npx -y @vendor/some-mcp-server
 ```
+
+Scan a live remote server over Streamable HTTP, the transport hosted MCP servers
+speak. Point `--http` at the server's MCP endpoint, which usually ends in `/mcp`:
+
+```
+rune --http https://mcp.example.com/mcp
+```
+
+Most hosted servers want a token. `--header` takes a `Name: value` pair and
+repeats:
+
+```
+rune --http https://mcp.example.com/mcp --header "Authorization: Bearer $TOKEN"
+```
+
+This is the same scan as `--stdio`, not the narrower one a captured reply gives
+you: rune completes the handshake, so it reads the server's own `instructions`
+and `serverInfo`, then lists tools, prompts, and resources. Piping in a single
+`tools/list` reply (above) can only ever show you the tools. It still never calls
+a tool, renders a prompt, or reads a resource body.
+
+A header value is only ever sent, never printed: rune does not echo it back in an
+error, and `--sarif` strips any userinfo and query string off the URL before
+writing it into the log. If you send headers over plain `http` to anything but
+localhost, rune warns on stderr that the credential is crossing the network in
+the clear, and continues.
 
 Machine-readable output and CI:
 
@@ -245,12 +273,17 @@ secret itself is what's being sent, and where.
 
 rune is a signal for human review, not a proof of safety.
 
-- It scans stdio servers and saved manifests, including the raw JSON-RPC
-  `tools/list` reply an HTTP server returns, whether that reply is a JSON body or
-  a `text/event-stream` (it reads the SSE `data:` frames). It does not speak the
-  HTTP or SSE transport itself, so for those servers capture the `tools/list`
-  (and `prompts/list`, `resources/list`) reply and scan it, or pipe it in with
-  `-`.
+- It scans live servers over stdio and over Streamable HTTP (`--http`), plus
+  saved manifests, including the raw JSON-RPC `tools/list` reply an HTTP server
+  returns, whether that reply is a JSON body or a `text/event-stream` (it reads
+  the SSE `data:` frames). It does not speak the older HTTP+SSE transport
+  (the deprecated two-endpoint `/sse` style) as a client; for such a server,
+  capture the `tools/list` (and `prompts/list`, `resources/list`) reply and scan
+  it, or pipe it in with `-`.
+- `--http` follows redirects, and the HTTP client drops an `Authorization`
+  header if a server redirects it to another origin. A custom credential header
+  such as `X-Api-Key` is not covered by that rule, so point `--http` at an
+  endpoint you got from the vendor rather than one a third party handed you.
 - It reads listing metadata for tools, prompts, and resources, plus the server's
   own `instructions` and `serverInfo` from the handshake. It never calls a tool,
   renders a prompt, or reads a resource's body, so nothing the server can execute
@@ -267,7 +300,8 @@ rune is a signal for human review, not a proof of safety.
 
 - `0` nothing at or above `--fail-on` (default `medium`)
 - `1` at least one finding at or above `--fail-on`
-- `2` operational error (bad manifest, server would not start)
+- `2` operational error (bad manifest, server would not start, endpoint
+  unreachable or refused the credentials)
 
 ## Development
 

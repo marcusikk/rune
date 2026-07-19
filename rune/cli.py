@@ -43,6 +43,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="spawn a live stdio MCP server and scan it: --stdio CMD [ARGS...]",
     )
     parser.add_argument(
+        "--http",
+        metavar="URL",
+        help="scan a live Streamable HTTP MCP server at URL (often ends in /mcp)",
+    )
+    parser.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar="NAME:VALUE",
+        help="send an extra HTTP header with --http, e.g. "
+        "'Authorization: Bearer TOKEN'; repeatable",
+    )
+    parser.add_argument(
         "--fail-on",
         choices=("low", "medium", "high"),
         default="medium",
@@ -376,6 +389,80 @@ def _normalize(data: Any) -> dict[str, list[dict[str, Any]]]:
     )
 
 
+# Hosts where an unencrypted request never leaves the machine, so sending a
+# credential over plain http to one of them is not exposing it on a network.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _parse_headers(values: list[str]) -> dict[str, str]:
+    """Turn "Name: value" strings into a header dict.
+
+    Splits on the first colon only, so a value that is itself a URL survives.
+    A malformed entry raises without quoting the input: the thing most likely
+    to be in a --header is a token, and it must not reach a terminal or a CI
+    log just because it was typed wrong.
+    """
+    headers: dict[str, str] = {}
+    for raw in values:
+        name, sep, value = raw.partition(":")
+        name, value = name.strip(), value.strip()
+        if not sep or not name:
+            raise ValueError('bad --header, expected "Name: value"')
+        headers[name] = value
+    return headers
+
+
+def _check_http_url(url: str) -> None:
+    """Reject a URL rune cannot fetch, before any credential is attached."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme in ("http", "https"):
+        if not parts.hostname:
+            raise ValueError(f"--http URL has no host: {url!r}")
+        return
+    if parts.netloc:
+        # A real URL naming a transport rune cannot audit, e.g. ftp://host/x.
+        raise ValueError(f"--http only speaks http and https, got {parts.scheme!r}")
+    # No authority to speak to. Covers a bare "example.com/mcp", a bare path,
+    # and "file:///etc/passwd", which urlsplit reads as a scheme with no host.
+    raise ValueError(f"--http needs an http:// or https:// URL, got {url!r}")
+
+
+def _cleartext_warning(url: str, headers: dict[str, str]) -> str | None:
+    """Warn when credentials would cross a network unencrypted.
+
+    Not fatal: an internal plain-http deployment is a real thing and the URL is
+    the user's own explicit choice. Silence would not be, so it is said out loud.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if not headers or parts.scheme != "http":
+        return None
+    if (parts.hostname or "").lower() in _LOOPBACK_HOSTS:
+        return None
+    return (
+        f"rune: warning: sending {len(headers)} header(s) unencrypted over http "
+        f"to {parts.hostname}; use https if the endpoint offers it"
+    )
+
+
+def _sarif_uri(url: str) -> str:
+    """The --http URL with anything secret stripped, for the SARIF artifact URI.
+
+    A SARIF log is uploaded and kept, so a token that rode in the query string
+    or in userinfo must not be written into it alongside the findings.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
 def _want_color(args: argparse.Namespace, out: TextIO) -> bool:
     if args.no_color or args.json or args.sarif or os.environ.get("NO_COLOR"):
         return False
@@ -397,9 +484,29 @@ def main(
     args = parser.parse_args(argv)
 
     manifest = args.manifest_flag or args.manifest
-    if bool(manifest) == bool(args.stdio):
-        print("rune: give exactly one of a manifest path or --stdio CMD", file=err)
+    sources = [bool(manifest), bool(args.stdio), bool(args.http)]
+    if sum(sources) != 1:
+        print(
+            "rune: give exactly one of a manifest path, --stdio CMD, or --http URL",
+            file=err,
+        )
         return _EXIT_ERROR
+
+    if args.header and not args.http:
+        print("rune: --header only applies to --http", file=err)
+        return _EXIT_ERROR
+
+    headers: dict[str, str] = {}
+    if args.http:
+        try:
+            _check_http_url(args.http)
+            headers = _parse_headers(args.header)
+        except ValueError as exc:
+            print(f"rune: {exc}", file=err)
+            return _EXIT_ERROR
+        warning = _cleartext_warning(args.http, headers)
+        if warning:
+            print(warning, file=err)
 
     if args.baseline and args.write_baseline:
         print("rune: use --baseline or --write-baseline, not both", file=err)
@@ -415,6 +522,14 @@ def main(
 
             try:
                 groups = fetch_metadata(args.stdio[0], list(args.stdio[1:]))
+            except LiveScanError as exc:
+                print(f"rune: live scan failed: {exc}", file=err)
+                return _EXIT_ERROR
+        elif args.http:
+            from .client import LiveScanError, fetch_metadata_http
+
+            try:
+                groups = fetch_metadata_http(args.http, headers=headers)
             except LiveScanError as exc:
                 print(f"rune: live scan failed: {exc}", file=err)
                 return _EXIT_ERROR
@@ -462,9 +577,13 @@ def main(
         baselined = apply_baseline(results, accepted)
 
     if args.sarif:
-        # A live or piped scan has no file on disk to point an alert at, so the
-        # artifact URI is only set when a real manifest path was read.
-        source_uri = manifest if manifest and manifest != _STDIN_ARG else None
+        # A stdio or piped scan has no file on disk to point an alert at, so the
+        # artifact URI is only set when a real manifest path was read, or when
+        # --http gave a genuine URI to name (credentials stripped out of it).
+        if args.http:
+            source_uri = _sarif_uri(args.http)
+        else:
+            source_uri = manifest if manifest and manifest != _STDIN_ARG else None
         print(render_sarif(results, uri=source_uri, version=_VERSION), file=out)
     elif args.json:
         print(render_json(results, baselined=baselined), file=out)

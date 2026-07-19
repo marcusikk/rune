@@ -95,11 +95,108 @@ def _load_manifest(path: str, stdin: TextIO) -> dict[str, list[dict[str, Any]]]:
             # Empty stdin is an operational error, not a clean scan: a gate that
             # reports 0 findings on no input at all is the wrong kind of quiet.
             raise ValueError("no JSON on stdin")
-        data = json.loads(text)
     else:
         with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    return _normalize(data)
+            text = fh.read()
+    return _normalize(_parse_document(text))
+
+
+# Returned by _sse_payload when the input carries no SSE framing at all, so the
+# caller re-raises the original JSON error rather than a misleading SSE one.
+_NO_SSE = object()
+
+
+def _parse_document(text: str) -> Any:
+    """Parse the input as JSON, falling back to an SSE (text/event-stream) reply.
+
+    An MCP Streamable HTTP server answers a tools/list POST with an event stream,
+    not a bare JSON body: the reply arrives framed as ``event: message`` then
+    ``data: {json}`` and a blank line. When the text is not JSON, lift the
+    JSON-RPC message out of the SSE ``data:`` frames so the same
+    ``curl ... | rune -`` pipe works against those servers, instead of forcing
+    the framing to be stripped by hand first. The lifted message flows through
+    the same _normalize path as a plain body, so nothing downstream changes.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        payload = _sse_payload(text)
+        if payload is _NO_SSE:
+            raise
+        return payload
+
+
+def _sse_data_events(text: str) -> list[str]:
+    """Return the data payload of each dispatched SSE event, in order.
+
+    Follows the EventSource line handling: a line is split on its first colon
+    into a field name and value, one leading space is stripped from the value,
+    ``data`` fields within an event join with newlines, a line beginning with a
+    colon is a keep-alive comment, and a blank line dispatches the accumulated
+    event. Only ``data`` is collected; the event type, id and retry fields do not
+    carry the JSON body. Lines are split on CRLF, CR or LF, the three SSE line
+    terminators, and nothing else.
+    """
+    events: list[str] = []
+    data_lines: list[str] = []
+    have_data = False
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line == "":
+            if have_data:
+                events.append("\n".join(data_lines))
+            data_lines = []
+            have_data = False
+            continue
+        if line.startswith(":"):
+            continue
+        field, sep, value = line.partition(":")
+        if sep and value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            data_lines.append(value)
+            have_data = True
+    if have_data:
+        events.append("\n".join(data_lines))
+    return events
+
+
+def _sse_payload(text: str) -> Any:
+    """Lift the JSON-RPC reply out of an SSE stream, or signal it is not SSE.
+
+    Returns ``_NO_SSE`` when the text has no ``data:`` frame, so a genuinely
+    malformed JSON file still surfaces its own parse error rather than a
+    confusing one about event streams. A stream that does carry frames but no
+    JSON, or that carries more than one JSON-RPC response, is a loud error: a
+    gate must never quietly pick one reply and skip a poisoned sibling. Server
+    notifications (no ``result``/``error``) are ignored so a keep-alive or a
+    progress event beside the real reply does not read as ambiguity.
+    """
+    data_events = _sse_data_events(text)
+    if not data_events:
+        return _NO_SSE
+    scannable: list[Any] = []
+    for chunk in data_events:
+        try:
+            message = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict | list):
+            scannable.append(message)
+    if not scannable:
+        raise ValueError(
+            "input is an SSE (text/event-stream) response but no data: frame "
+            "held a JSON message to scan"
+        )
+    responses = [
+        m for m in scannable if isinstance(m, dict) and ("result" in m or "error" in m)
+    ]
+    chosen = responses or scannable
+    if len(chosen) > 1:
+        raise ValueError(
+            "the SSE stream carried more than one JSON-RPC response; save the "
+            "single tools/list, prompts/list or resources/list reply and scan that"
+        )
+    return chosen[0]
 
 
 # How to name a JSON value in an error message.

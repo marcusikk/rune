@@ -529,6 +529,149 @@ def test_result_malformed_listing_still_exits_two(tmp_path: Path) -> None:
     assert '"tools" must be a list' in err
 
 
+# --- SSE (text/event-stream) input -------------------------------------------
+#
+# A Streamable HTTP MCP server answers a tools/list POST with an event stream,
+# not a JSON body: the reply is framed as "event: message" then "data: {json}"
+# and a blank line. rune lifts the JSON-RPC reply out of the data: frames so the
+# same curl ... | rune - pipe works for those servers, instead of exiting 2 on
+# framing it used to ask the user to strip by hand.
+
+
+def _sse_message(obj) -> str:
+    # One SSE "message" event carrying a JSON payload, blank-line terminated.
+    return f"event: message\ndata: {json.dumps(obj)}\n\n"
+
+
+def test_sse_tools_list_reply_piped_exits_one() -> None:
+    # The headline claim: a poisoned tools/list reply arrives as an event stream
+    # and is scanned and failed, not choked on as non-JSON.
+    stream = _sse_message(_envelope({"tools": _POISONED}))
+    code, out, _ = _run(["-"], stdin=stream)
+    assert code == 1
+    assert "data-exfiltration" in out
+
+
+def test_sse_clean_reply_exits_zero() -> None:
+    stream = _sse_message(_envelope({"tools": [_CLEAN_TOOL]}))
+    code, out, _ = _run(["-"], stdin=stream)
+    assert code == 0
+    assert "CLEAN" in out
+
+
+def test_sse_stream_is_not_valid_json() -> None:
+    # Positive control: the stream rune now accepts is not itself JSON, so the
+    # scan above rides on the SSE parser, not on json.loads coping with framing.
+    stream = _sse_message(_envelope({"tools": _POISONED}))
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(stream)
+
+
+def test_sse_crlf_line_endings() -> None:
+    # SSE terminates lines with CRLF. The reply must scan the same with \r\n.
+    body = json.dumps(_envelope({"tools": _POISONED}))
+    stream = f"event: message\r\ndata: {body}\r\n\r\n"
+    code, out, _ = _run(["-"], stdin=stream)
+    assert code == 1
+    assert "data-exfiltration" in out
+
+
+def test_sse_skips_comments_and_non_json_events() -> None:
+    # A real stream opens with an endpoint event and sends keep-alive comments.
+    # Neither is the reply, so both are ignored and the message is still scanned.
+    body = json.dumps(_envelope({"tools": _POISONED}))
+    stream = (
+        ": keep-alive\n"
+        "event: endpoint\ndata: /messages?session=abc\n\n"
+        ": ping\n\n"
+        f"event: message\ndata: {body}\n\n"
+    )
+    code, out, _ = _run(["-"], stdin=stream)
+    assert code == 1
+    assert "data-exfiltration" in out
+
+
+def test_sse_response_chosen_over_notification() -> None:
+    # A progress notification (no result/error) sits before the real reply. It is
+    # not a response, so rune scans the reply rather than treating the stream as
+    # ambiguous or scanning the notification instead.
+    note = {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"p": 1}}
+    stream = _sse_message(note) + _sse_message(_envelope({"tools": _POISONED}))
+    code, out, _ = _run(["-"], stdin=stream)
+    assert code == 1
+    assert "data-exfiltration" in out
+
+
+def test_sse_multiline_data_is_joined() -> None:
+    # A server may pretty-print the JSON across several data: lines; SSE joins
+    # them with newlines, which json.loads reads back as one object.
+    body = json.dumps(_envelope({"tools": _POISONED}), indent=2)
+    data = "".join(f"data: {line}\n" for line in body.split("\n"))
+    stream = f"event: message\n{data}\n"
+    code, out, _ = _run(["-"], stdin=stream)
+    assert code == 1
+    assert "data-exfiltration" in out
+
+
+def test_sse_multiple_responses_exit_two() -> None:
+    # Two JSON-RPC replies in one stream is ambiguous, and a gate must not
+    # silently scan one and skip the other: a poisoned reply cannot hide behind a
+    # clean one. rune stops and names the problem.
+    clean = _sse_message(_envelope({"tools": [_CLEAN_TOOL]}))
+    poison = _sse_message(_envelope({"tools": _POISONED}))
+    code, _, err = _run(["-"], stdin=clean + poison)
+    assert code == 2
+    assert "more than one JSON-RPC response" in err
+
+
+def test_sse_without_json_data_exits_two() -> None:
+    # Framing is present but no data: frame carries JSON, so there is nothing to
+    # scan. That is a loud error, never a clean pass.
+    stream = "event: message\ndata: not json at all\n\n"
+    code, _, err = _run(["-"], stdin=stream)
+    assert code == 2
+    assert "no data: frame held a JSON message" in err
+
+
+def test_non_sse_garbage_keeps_json_error() -> None:
+    # Text with no data: frame is not an event stream, so its own JSON parse
+    # error stands rather than being masked by an SSE-specific message.
+    code, _, err = _run(["-"], stdin="{not valid")
+    assert code == 2
+    assert "cannot read manifest" in err
+    assert "SSE" not in err
+
+
+def test_sse_payload_signals_non_sse() -> None:
+    # The internal contract the branch above rides on: non-SSE text returns the
+    # sentinel so the caller re-raises the original JSON error.
+    from rune.cli import _NO_SSE, _sse_payload
+
+    assert _sse_payload("{not json") is _NO_SSE
+
+
+def test_sse_from_a_file(tmp_path: Path) -> None:
+    # The same event-stream reply works saved to a file, not only piped in.
+    path = tmp_path / "reply.sse"
+    path.write_text(_sse_message(_envelope({"tools": _POISONED})), encoding="utf-8")
+    code, out, _ = _run([str(path)])
+    assert code == 1
+    assert "data-exfiltration" in out
+
+
+def test_sse_finding_matches_file_baseline(tmp_path: Path) -> None:
+    # A finding's identity does not depend on whether it came from a file or an
+    # event stream, so a baseline written from a file suppresses the same finding
+    # piped in as SSE.
+    manifest = _write(tmp_path, _POISONED)
+    baseline = tmp_path / "b.json"
+    assert _run([manifest, "--write-baseline", str(baseline)])[0] == 0
+    stream = _sse_message(_POISONED)
+    code, out, _ = _run(["-", "--baseline", str(baseline)], stdin=stream)
+    assert code == 0
+    assert "1 baselined" in out
+
+
 def test_empty_tool_list_exits_zero(tmp_path: Path) -> None:
     manifest = _write(tmp_path, [])
     code, out, _ = _run([manifest])

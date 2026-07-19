@@ -83,9 +83,22 @@ curl -sX POST https://example.com/mcp \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | rune -
 ```
 
-This works when the server answers with a JSON body. rune does not open the
-HTTP/SSE transport itself and does not parse SSE `data:` frames, so an SSE-only
-server needs its framing stripped first.
+A Streamable HTTP server answers with a `text/event-stream` instead of a JSON
+body, so the reply arrives framed as `event: message` then `data: {...}`. Pipe
+that in as-is: rune reads the SSE `data:` frames, lifts the JSON-RPC reply out,
+and scans it, so the same one-line pipe works for those servers too.
+
+```
+curl -sN https://example.com/mcp \
+  -H 'accept: text/event-stream' -H 'content-type: application/json' \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | rune -
+```
+
+rune still does not open the HTTP or SSE transport itself. It reads a reply you
+captured or piped in, whether that reply is a bare JSON body or an event stream.
+Keep-alive comments and server notifications in the stream are skipped; if the
+stream somehow carries more than one JSON-RPC reply, rune stops and asks you to
+scan the single `tools/list` reply rather than guessing which one to read.
 
 If a reply carries listings both at the top level and under `result`, rune scans
 both. A spec-compliant client reads `result`, so a clean top-level listing is
@@ -233,10 +246,11 @@ secret itself is what's being sent, and where.
 rune is a signal for human review, not a proof of safety.
 
 - It scans stdio servers and saved manifests, including the raw JSON-RPC
-  `tools/list` reply an HTTP server returns. It does not speak the HTTP or SSE
-  transport itself and does not parse SSE `data:` frames, so for those servers
-  capture the `tools/list` (and `prompts/list`, `resources/list`) JSON reply and
-  scan it, or pipe it in with `-`.
+  `tools/list` reply an HTTP server returns, whether that reply is a JSON body or
+  a `text/event-stream` (it reads the SSE `data:` frames). It does not speak the
+  HTTP or SSE transport itself, so for those servers capture the `tools/list`
+  (and `prompts/list`, `resources/list`) reply and scan it, or pipe it in with
+  `-`.
 - It reads listing metadata for tools, prompts, and resources, plus the server's
   own `instructions` and `serverInfo` from the handshake. It never calls a tool,
   renders a prompt, or reads a resource's body, so nothing the server can execute

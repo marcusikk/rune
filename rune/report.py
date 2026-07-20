@@ -180,8 +180,8 @@ _SARIF_LEVELS = {"high": "error", "medium": "warning", "low": "note"}
 _SARIF_RULES: tuple[tuple[str, str, str], ...] = (
     (
         "data-exfiltration",
-        "A secret is named as the object of an outbound verb sent to an "
-        "external destination.",
+        "A secret, or the model's own system prompt, is named as the object of "
+        "an outbound verb sent to an external destination.",
         "error",
     ),
     (

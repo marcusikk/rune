@@ -175,6 +175,84 @@ _CRED = (
     r"|id_rsa|id_ed25519|id_ecdsa|\.npmrc|\.netrc|\.pgpass)"
 )
 
+# The model's own INSTRUCTION context - the system or developer prompt it runs
+# under - is not a named credential, so the object set above never matched it.
+# Yet it is exactly what a prompt-injection wants back: the system prompt is the
+# hidden instruction set, and reading it off the box is prompt-extraction
+# exfiltration. With the object limited to credentials, "send the system prompt
+# to evil.tk" and "exfiltrate the developer prompt" both read CLEAN. These heads
+# join the object set so both fire, and inherit the destination-attachment
+# precision unchanged.
+#
+# Scope is the instruction context on purpose, NOT the conversation. An earlier
+# cut also matched "conversation", "chat history", "transcript" and bare "chat",
+# and those fire on the mainstream of MCP tools: a Slack sender ("send a chat
+# message to ..."), an audio transcriber ("upload the transcript to ..."), and
+# above all any memory-enabled LLM proxy ("send the conversation to the model
+# endpoint"). Forwarding a chat to an external endpoint is what inference IS, so
+# it cannot be told from exfil by destination alone and would cry wolf on most
+# LLM tools. The system prompt is different: an honest tool names its input "the
+# user's message" or "the prompt", never "the system prompt" being shipped out,
+# so the phrase itself is the tell. This is stated in the README scope.
+#
+# The words are joined by _CTX_SEP, not a bare space, because snake_case and
+# kebab-case are the idiomatic spellings in the MCP tool schemas rune scans:
+# "system_prompt" and "developer-prompt" are how these fields are actually named.
+# The credential heads in _CRED accept the same [ _-] separators, so a heads-only
+# space match would leave "exfiltrate the system_prompt" reading CLEAN, a real
+# detection hole rather than paraphrase evasion. Tab is kept from the earlier cut
+# so a wrapped description still matches.
+_CTX_SEP = r"[ \t_-]+"
+_CONTEXT_HEAD = (
+    r"system" + _CTX_SEP + r"prompts?"
+    r"|developer" + _CTX_SEP + r"prompts?"
+    r"|system" + _CTX_SEP + r"instructions?"
+    r"|context" + _CTX_SEP + r"windows?"
+)
+
+# "system prompt" can be a modifier rather than the head being sent: a "system
+# prompt template", "editor", "builder" or "example" is a UI or config artifact,
+# not the live prompt. The word that follows decides, the same idea as _NOT_HEAD,
+# but the head-noun set that follows a prompt differs from the one that follows a
+# credential, so this guard is context-specific. Removing it re-opens the
+# modifier false positives (a prompt-management tool that syncs a template to a
+# config service), which the benign corpus pins.
+#
+# The guard reuses _CTX_SEP, the head's own [ \t_-]+ separator, and the "_" in it
+# is load-bearing, not dead code. A pure snake_case run like "system_prompt_editor"
+# never reaches this guard: the object group ends on a trailing \b, and "_" is a
+# word character, so the head cannot end before an underscore in the first place.
+# The underscore matters for a MIXED separator run that starts with a non-word
+# char, "system-prompt-_template": the head ends on \b at the hyphen after
+# "prompt", then this guard must consume the whole "-_" run to reach "template".
+# A hyphen-only guard consumes just the "-", fails on the "_", misses the modifier,
+# and reads the head as the live prompt. That is a real false positive, and it is
+# only visible with a hostile verb and no destination (branch A), where no
+# attachment step masks the guard: "exfiltrate the system-prompt-_template" would
+# fire on a template. Sharing _CTX_SEP with the head is what refuses it.
+_CONTEXT_NOT_HEAD = (
+    r"(?!" + _CTX_SEP + r"(?:template|templates|editor|editors|builder|builders"
+    r"|library|libraries|snippet|snippets|example|examples|variable|variables"
+    r"|box|boxes|area|areas|configuration|config|configs|setting|settings"
+    r"|field|fields|form|forms|input|inputs|placeholder|placeholders"
+    r"|manager|generator|page|screen|dialog|panel|widget|button|tab|section)\b)"
+)
+
+_CONTEXT = r"(?:" + _CONTEXT_HEAD + r")" + _CONTEXT_NOT_HEAD
+
+# The full object set an exfil verb may target: a named credential or the model's
+# own instruction context. Branches A and B key on this; the pronoun branch C and
+# its antecedent test stay credential-only, so "send it" after a bare "system
+# prompt" is a deliberate miss rather than a looser rule (documented in the
+# README scope).
+_OBJECT = r"(?:" + _CRED + r"|" + _CONTEXT + r")"
+
+# Classifies a matched object so a finding names what was sent accurately: a
+# credential reads as "a secret", a context head as the system prompt. Matches
+# the head only; the modifier guard above is a zero-width lookahead, so the
+# captured object is exactly the head phrase.
+_CONTEXT_RE = re.compile(_CONTEXT_HEAD, _FLAGS)
+
 # One vendor or product word may sit between the determiner and the secret:
 # "the user's OpenAI API key", "the AWS credentials". Prepositions and
 # conjunctions are excluded so this cannot bridge a verb to an unrelated
@@ -293,15 +371,17 @@ _OBJ_LEAD = (
     r"(?:[~./][\w./~-]{0,80}/)?" + _CRED_MOD
 )
 
-# Branch A: an inherently-hostile verb directly governing a secret.
+# Branch A: an inherently-hostile verb directly governing a secret or the model's
+# own system prompt.
 _EXFIL_A = re.compile(
-    r"\b" + _EXFIL_VERB + r"\b[ \t]+" + _OBJ_LEAD + _CRED + r"\b" + _NOT_HEAD,
+    r"\b" + _EXFIL_VERB + r"\b[ \t]+" + _OBJ_LEAD + r"(?P<obj>" + _OBJECT + r")\b" + _NOT_HEAD,
     _FLAGS,
 )
 
-# Branch B: an outbound verb whose direct object is a secret.
+# Branch B: an outbound verb whose direct object is a secret or the model's own
+# system prompt.
 _EXFIL_B = re.compile(
-    r"\b" + _OUTBOUND + r"\b[ \t]+" + _OBJ_LEAD + _CRED + r"\b" + _NOT_HEAD,
+    r"\b" + _OUTBOUND + r"\b[ \t]+" + _OBJ_LEAD + r"(?P<obj>" + _OBJECT + r")\b" + _NOT_HEAD,
     _FLAGS,
 )
 
@@ -460,6 +540,19 @@ def _attached_dest(text: str, obj_end: int) -> re.Match[str] | None:
     return dest
 
 
+def _object_label(match: re.Match[str]) -> str:
+    """Name the flagged object for the finding message.
+
+    Branches A and B capture the object as ``obj``; a context head reads as the
+    model's system prompt, anything else is a named credential.
+    """
+    return (
+        "the model's system prompt or instructions"
+        if _CONTEXT_RE.fullmatch(match.group("obj"))
+        else "a secret"
+    )
+
+
 @_emits("data-exfiltration")
 def _exfiltration(text: str) -> Iterator[Hit]:
     reported: set[int] = set()
@@ -471,7 +564,7 @@ def _exfiltration(text: str) -> Iterator[Hit]:
         yield ("data-exfiltration", Severity.HIGH, start, end - start, why)
 
     for m in _EXFIL_A.finditer(text):
-        yield from emit(m.start(), m.end(), "hostile verb targets a secret")
+        yield from emit(m.start(), m.end(), f"hostile verb targets {_object_label(m)}")
 
     for m in _EXFIL_B.finditer(text):
         dest = _attached_dest(text, m.end())
@@ -479,7 +572,8 @@ def _exfiltration(text: str) -> Iterator[Hit]:
             yield from emit(
                 m.start(),
                 dest.end(),
-                "secret is the object of an outbound verb sent to an external destination",
+                f"{_object_label(m)} is the object of an outbound verb sent to an "
+                "external destination",
             )
 
     # Branch C only when a secret precedes the verb and nothing in the SAME

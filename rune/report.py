@@ -208,6 +208,13 @@ _SARIF_RULES: tuple[tuple[str, str, str], ...] = (
         "error",
     ),
     (
+        "compatibility-characters",
+        "Text styled in a Unicode compatibility variant of ASCII (fullwidth, "
+        "mathematical, or circled letters) that normalizes to a payload another "
+        "rule catches, used to slip it past the ASCII rules.",
+        "error",
+    ),
+    (
         "injection-markup",
         "Markup a model may read as an instruction boundary, such as <system> "
         "or [INST].",

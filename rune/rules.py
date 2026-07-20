@@ -285,6 +285,96 @@ def _confusables(text: str) -> Iterator[Hit]:
         )
 
 
+# --- compatibility-character obfuscation ------------------------------------
+#
+# invisible-characters catches text hidden with characters that render as
+# nothing; confusable-characters catches a Latin word laced with a Cyrillic or
+# Greek look-alike. Both leave a third dressing of the same trick open: a word
+# typed entirely in a Unicode COMPATIBILITY variant of ASCII. The fullwidth
+# forms (U+FF21..FF5A), the mathematical alphabets (U+1D400..), the circled and
+# parenthesised letters and the ligatures all render as ordinary letters to a
+# reading model and all decompose to plain ASCII under NFKC, yet none is a
+# confusable (they are not single look-alikes mixed into a Latin word, they ARE
+# the word) and none is invisible. So "ignore all previous instructions" typed
+# in fullwidth reads as English to the model while every ASCII rule in this file
+# runs straight past it.
+#
+# This closes that hole the way the rest of the family does: it does not fire on
+# "styled text exists", it normalises the styled text and fires only when the
+# plain-ASCII form trips one of the OTHER rules. It inherits their precision, so
+# honest fullwidth CJK copy, a trademark sign or a superscript that normalises to
+# nothing hostile stays quiet, and a JWT or an id that happens to carry a styled
+# character never fires on its own.
+
+# The obfuscation rules read raw code points, so re-running them on the
+# normalised text is meaningless (confusables survive NFKC unchanged, invisible
+# characters likewise) and running this rule inside itself would recurse. The
+# inner set is therefore every rule except the three obfuscation rules, built
+# once from _TEXT_RULES below and referenced at call time.
+_OBFUSCATION_IDS = frozenset(
+    {"invisible-characters", "confusable-characters", "compatibility-characters"}
+)
+
+
+def _clip(text: str, limit: int = 80) -> str:
+    """Collapse whitespace and bound a revealed snippet for a one-line message."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
+
+
+def _nfkc_with_map(text: str) -> tuple[str, list[int]]:
+    """NFKC-normalise per code point and return (normalised, raw-index map).
+
+    The map gives, for each character of the normalised string, the index of the
+    raw character it came from, so a hit found in the normalised text can be
+    reported at the offset of the styled characters in the original. Normalising
+    one code point at a time is what keeps that map exact even when a character
+    expands (a ligature to two letters). Canonical reordering across combining
+    marks is the only thing full-string NFKC would do differently, and it never
+    manufactures an ASCII instruction, so per-code-point normalisation loses no
+    attack while keeping every offset addressable in the raw string.
+    """
+    out: list[str] = []
+    index: list[int] = []
+    for i, ch in enumerate(text):
+        piece = unicodedata.normalize("NFKC", ch)
+        out.append(piece)
+        index.extend([i] * len(piece))
+    return "".join(out), index
+
+
+@_emits("compatibility-characters")
+def _compatibility(text: str) -> Iterator[Hit]:
+    # Pure ASCII is always NFKC-stable, and that is the overwhelming common case,
+    # so settle it without touching the normaliser at all.
+    if text.isascii():
+        return
+    normalized, index = _nfkc_with_map(text)
+    if normalized == text:
+        return
+    # An attack the RAW text already trips is reported by the rule that caught
+    # it; this rule is only for what the styling HID. Compare by rule id: if a
+    # rule already fires on the raw string, its normalised twin is not news, so a
+    # description that spells the payload out in ASCII and also styles a copy is
+    # flagged once, by the rule that owns it, not twice.
+    raw_ids = {h[0] for rule in _COMPAT_INNER for h in rule(text)}
+    for rule in _COMPAT_INNER:
+        for rule_id, _sev, off, length, message in rule(normalized):
+            if rule_id in raw_ids:
+                continue
+            raw_start = index[off]
+            raw_end = index[off + length - 1] + 1
+            revealed = _clip(normalized[off : off + length])
+            yield (
+                "compatibility-characters",
+                Severity.HIGH,
+                raw_start,
+                raw_end - raw_start,
+                f"compatibility characters normalize to \"{revealed}\", "
+                f"which is {message}",
+            )
+
+
 # --- text pattern rules ------------------------------------------------------
 
 _FLAGS = re.IGNORECASE
@@ -909,6 +999,7 @@ def _regex_rule(
 _TEXT_RULES: tuple[TextRule, ...] = (
     _invisible,
     _confusables,
+    _compatibility,
     _regex_rule(
         "hidden-instructions",
         Severity.HIGH,
@@ -929,6 +1020,14 @@ _TEXT_RULES: tuple[TextRule, ...] = (
     ),
     _exfiltration,
     _sensitive_file_access,
+)
+
+# The rules compatibility-characters re-runs over the normalised text: every
+# rule except the three obfuscation rules (see _OBFUSCATION_IDS). Built from
+# _TEXT_RULES so a new pattern rule is picked up on its own, and referenced by
+# _compatibility at call time so the recursion guard holds by construction.
+_COMPAT_INNER: tuple[TextRule, ...] = tuple(
+    rule for rule in _TEXT_RULES if not (set(rule.rule_ids) & _OBFUSCATION_IDS)
 )
 
 # Every rule id the engine can emit. Derived from _TEXT_RULES, never typed out

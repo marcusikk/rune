@@ -53,6 +53,7 @@ def test_sarif_envelope_is_well_formed(tmp_path: Path) -> None:
         "concealment",
         "invisible-characters",
         "confusable-characters",
+        "compatibility-characters",
         "injection-markup",
         "sensitive-file-access",
     ]

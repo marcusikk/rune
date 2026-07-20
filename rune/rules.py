@@ -212,8 +212,46 @@ _TLDS = (
     "|click|host|space|tk|ml|ga|cf|gq"
 )
 
+# A dotted-quad IPv4 literal. A URL with an IP host is already a destination via
+# the scheme branch below ("https://1.2.3.4/x"); this is the scheme-less form,
+# "post the API key to 185.220.101.5:9001", which a collector uses to stay off
+# the domain-reputation lists a hostname would land on. The 0-255 octet bound is
+# what tells a real address from a dotted version string, and the trailing
+# guard refuses a fifth octet so "1.2.3.4.5" is not read as one while a
+# sentence-final "...to 8.8.8.8." still is.
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
+_IPV4 = _OCTET + r"(?:\." + _OCTET + r"){3}"
+
+# An IPv6 literal, the exact sibling of the IPv4 case: a collector reached by raw
+# address, in the two shapes one is written by hand. RFC 3986 wraps the host in
+# brackets so a port can follow ("[2001:db8::1]:9001"); the bare form has no port
+# ("send the key to 2001:db8::1"). The branches below are the nine canonical
+# positions of the "::" run plus the full eight-group form, each a fixed shape so
+# a long colon-hex run cannot make the engine backtrack. The bare form is only
+# read as an address when it carries "::" compression or fills all eight groups,
+# which is what tells it from an unrelated colon-hex run: a 12:34:56 timestamp or
+# a MAC has neither, so neither is mistaken for a destination. An IPv6 URL host
+# is already a destination through the scheme branch above.
+_H16 = r"[0-9a-f]{1,4}"
+_IPV6 = (
+    r"(?:"
+    + r"(?:" + _H16 + r":){7}" + _H16
+    + r"|(?:" + _H16 + r":){1,7}:"
+    + r"|(?:" + _H16 + r":){1,6}:" + _H16
+    + r"|(?:" + _H16 + r":){1,5}(?::" + _H16 + r"){1,2}"
+    + r"|(?:" + _H16 + r":){1,4}(?::" + _H16 + r"){1,3}"
+    + r"|(?:" + _H16 + r":){1,3}(?::" + _H16 + r"){1,4}"
+    + r"|(?:" + _H16 + r":){1,2}(?::" + _H16 + r"){1,5}"
+    + r"|" + _H16 + r":(?::" + _H16 + r"){1,6}"
+    + r"|:(?::" + _H16 + r"){1,7}"
+    + r")"
+)
+
 _DEST = re.compile(
     r"https?://[^\s\"'<>]{1,200}"
+    r"|(?<![\w.])" + _IPV4 + r"(?!\.?[0-9])(?::[0-9]{1,5})?(?:/[^\s\"'<>]*)?"
+    r"|(?<![\w:.])\[" + _IPV6 + r"\](?::[0-9]{1,5})?(?:/[^\s\"'<>]*)?"
+    r"|(?<![\w:.])" + _IPV6 + r"(?![0-9a-f:])"
     r"|(?<![\w.])[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){0,3}\.(?:" + _TLDS + r")\b"
     r"|(?<![\w./@-])(?:[\w-]{1,63}\.){1,4}(?:" + _TLDS + r")\b(?![\w-])",
     _FLAGS,

@@ -125,7 +125,13 @@ def _invisible(text: str) -> Iterator[Hit]:
 # A word written ENTIRELY in confusables ("paypal" with every letter Cyrillic) is
 # not covered: with no Latin letter beside them it is indistinguishable from a
 # real Cyrillic word without a full transliteration model, which rune does not
-# carry. Requiring a Latin letter in the same word is what keeps this precise.
+# carry. The word must also carry at least two Latin letters, not one. A single
+# Latin letter next to a look-alike is science notation, not a spoofed word: the
+# H-alpha spectral line, the K-alpha X-ray, the electron neutrino nu_e, rho_c,
+# all of which pair one Latin letter with a real Greek alpha, nu, rho, iota or
+# kappa that happen to share a Latin twin in the table below. A spoofed
+# identifier ("account", "config", "proxy") always carries several Latin letters,
+# so the two-letter floor drops the notation without losing a real homoglyph.
 #
 # The table is keyed by codepoint, not by literal characters. A literal Cyrillic
 # "a" in this source would be the very thing the rule hunts - unreadable to a
@@ -198,6 +204,11 @@ _CONFUSABLE: dict[str, tuple[str, str]] = {
     chr(cp): (latin, script) for cp, latin, script in _CONFUSABLE_CODEPOINTS
 }
 
+# A spoofed word carries several Latin letters; a single Latin letter beside a
+# look-alike is science notation (H-alpha, nu_e). Two is the floor that keeps
+# the real homoglyphs and drops the notation.
+_MIN_LATIN_LETTERS = 2
+
 
 def _is_latin_letter(ch: str) -> bool:
     """Whether ch is a Latin-script letter (ASCII or accented).
@@ -226,16 +237,16 @@ def _confusables(text: str) -> Iterator[Hit]:
             i += 1
             continue
         start = i
-        has_latin = False
+        latin_count = 0
         found: list[str] = []
         while i < n and text[i].isalpha():
             ch = text[i]
             if ch in _CONFUSABLE:
                 found.append(ch)
             elif _is_latin_letter(ch):
-                has_latin = True
+                latin_count += 1
             i += 1
-        if not (has_latin and found):
+        if latin_count < _MIN_LATIN_LETTERS or not found:
             continue
         ch = found[0]
         latin, script = _CONFUSABLE[ch]

@@ -327,10 +327,14 @@ purpose. A word written *entirely* in look-alikes, with no Latin letter beside
 them, is not covered, because it cannot be told from a real Cyrillic or Greek word
 without transliterating it, which rune does not do. One exception keeps honest
 science notation quiet: a bare two-character token pairing a single Latin letter
-with one look-alike is a symbol, not a spoof (the H-alpha spectral line written
-`Ha`, the electron neutrino `nu_e`), so a real Greek alpha or nu that happens to
-share a Latin twin is left alone there. A spoofed identifier is a longer word,
-even one disguised down to its last Latin letter, so it still fires. Accented
+with one *Greek* look-alike is a symbol, not a spoof (the H-alpha spectral line
+written `Ha`, the electron neutrino `nu_e`), so a real Greek alpha or nu that
+happens to share a Latin twin is left alone there. The exemption is Greek-only,
+because scientific symbols are written in Greek and never in Cyrillic: a Cyrillic
+look-alike beside a lone Latin letter (`os`, `id` with a Cyrillic half) has no
+honest reading and fires even at two characters. A spoofed identifier is
+otherwise a longer word, even one disguised down to its last Latin letter, so it
+too still fires. Accented
 Latin (`cafe` with an acute, `Zurich` with an umlaut) is one script, not a mix, so
 it is left alone too, and it still counts as Latin, so a look-alike mixed into an
 accented word is caught.
@@ -467,9 +471,10 @@ rune is a signal for human review, not a proof of safety.
   letter with a Cyrillic or Greek look-alike from a closed list. A word spelled
   *entirely* in look-alike characters is out of scope: without a Latin letter
   beside them it cannot be told from a real Cyrillic or Greek word. A bare
-  two-character token pairing one Latin letter with one look-alike is treated as
-  notation (`Ha`, `nu_e`), not a spoof, so honest science symbols stay quiet; a
-  longer word still fires even when it is disguised down to a single Latin letter.
+  two-character token pairing one Latin letter with one *Greek* look-alike is
+  treated as notation (`Ha`, `nu_e`), not a spoof, so honest science symbols stay
+  quiet; the same shape with a Cyrillic look-alike has no honest reading and still
+  fires, as does any longer word, even one disguised down to a single Latin letter.
   An exotic look-alike outside the list is missed, the same closed-list trade
   `sensitive-file-access` makes, and look-alikes from other scripts and full-width
   forms are not covered.

@@ -159,11 +159,38 @@ def test_in_list_symbol_with_one_latin_letter_stays_quiet(text: str) -> None:
 
 def test_two_char_notation_pair_is_exempt_but_a_longer_token_is_not() -> None:
     # The exemption is by token length, not Latin-letter count. A bare
-    # two-character pair (one Latin letter, one look-alike) is notation and stays
-    # quiet, but a three-character token carrying the same single Latin letter is
-    # a word, not a symbol, and fires.
+    # two-character pair (one Latin letter, one Greek look-alike) is notation and
+    # stays quiet, but a three-character token carrying the same single Latin
+    # letter is a word, not a symbol, and fires.
     assert _hits("The H" + GRK_alpha + " line is bright.") == []  # "Ha", exempt
     assert _hits("Names the " + CYR_o + GRK_alpha + "p sink.") != []  # 3 chars
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        CYR_o + "s",  # "os" spoofed with a Cyrillic o
+        "i" + CYR_c,  # "ic" spoofed with a Cyrillic c
+        CYR_a + "i",  # "ai" spoofed with a Cyrillic a
+    ],
+)
+def test_two_char_cyrillic_pair_still_fires(word: str) -> None:
+    # The exemption is Greek-only: scientific notation is Greek, so a two-char
+    # token whose look-alike is CYRILLIC has no honest reading and must fire even
+    # at the notation length. This closes the blind spot where a maximally short
+    # identifier ("os", "ai") could be spoofed under the two-character exemption.
+    hits = _hits("Uses the " + word + " helper.")
+    assert len(hits) == 1
+    assert hits[0][1] is Severity.HIGH
+    assert "Cyrillic" in hits[0][4]
+
+
+def test_two_char_greek_notation_still_exempt() -> None:
+    # The other side of the Greek-only exemption: the H-alpha and rho-c pairs are
+    # Greek notation and must stay quiet, so narrowing to Cyrillic did not start
+    # flagging honest symbols.
+    assert _hits("The H" + GRK_alpha + " peak is sharp.") == []
+    assert _hits("The density " + GRK_rho + "c is bounded.") == []
 
 
 def test_accented_latin_counts_as_latin() -> None:

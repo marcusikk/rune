@@ -205,12 +205,16 @@ _CONFUSABLE: dict[str, tuple[str, str]] = {
     chr(cp): (latin, script) for cp, latin, script in _CONFUSABLE_CODEPOINTS
 }
 
-# A bare two-character token that pairs a single Latin letter with one look-alike
-# is science notation (the H-alpha line written "Ha", the neutrino "nu_e"), not a
-# spoofed word, so a token of exactly this shape is exempt. A spoofed identifier
-# is a longer word, even one disguised down to its last Latin letter, so it still
-# fires.
+# A bare two-character token that pairs a single Latin letter with one GREEK
+# look-alike is science notation (the H-alpha line written "Ha", the neutrino
+# "nu_e"), not a spoofed word, so a token of exactly this shape is exempt. The
+# exemption is Greek-only on purpose: scientific and mathematical symbols are
+# written in Greek, never in Cyrillic, so a Cyrillic look-alike beside a lone
+# Latin letter has no honest reading and still fires even at two characters. A
+# spoofed identifier is a longer word, even one disguised down to its last Latin
+# letter, so it too clears this guard.
 _NOTATION_PAIR_LEN = 2
+_NOTATION_SCRIPT = "Greek"
 
 
 def _is_latin_letter(ch: str) -> bool:
@@ -251,11 +255,18 @@ def _confusables(text: str) -> Iterator[Hit]:
             i += 1
         if not found or latin_count == 0:
             continue
-        # Exempt only a bare two-character notation pair (one Latin letter beside
-        # one look-alike): "Ha", "nu_e", "Ka", "rho_c". A spoofed identifier is a
-        # longer word, even one reduced to a single Latin letter ("proxy" with p,
-        # o, x and y all Cyrillic), so it clears this guard and still fires.
-        if i - start == _NOTATION_PAIR_LEN and latin_count == 1:
+        # Exempt only a bare two-character notation pair of one Latin letter and
+        # one GREEK look-alike: "Ha", "nu_e", "Ka", "rho_c". The pair must be
+        # Greek, since scientific symbols are Greek and a Cyrillic look-alike
+        # beside a lone Latin letter ("os", "id", "ai" with a Cyrillic half) is a
+        # spoof with no honest reading. A spoofed identifier is otherwise a longer
+        # word, even one reduced to a single Latin letter ("proxy" with p, o, x
+        # and y all Cyrillic), so it clears this guard and still fires.
+        if (
+            i - start == _NOTATION_PAIR_LEN
+            and latin_count == 1
+            and _CONFUSABLE[found[0]][1] == _NOTATION_SCRIPT
+        ):
             continue
         ch = found[0]
         latin, script = _CONFUSABLE[ch]

@@ -202,6 +202,12 @@ _SARIF_RULES: tuple[tuple[str, str, str], ...] = (
         "warning",
     ),
     (
+        "confusable-characters",
+        "A Cyrillic or Greek look-alike character mixed into a Latin word, used "
+        "to spoof a name or slip text past a reviewer and the other rules.",
+        "error",
+    ),
+    (
         "injection-markup",
         "Markup a model may read as an instruction boundary, such as <system> "
         "or [INST].",

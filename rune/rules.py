@@ -125,13 +125,14 @@ def _invisible(text: str) -> Iterator[Hit]:
 # A word written ENTIRELY in confusables ("paypal" with every letter Cyrillic) is
 # not covered: with no Latin letter beside them it is indistinguishable from a
 # real Cyrillic word without a full transliteration model, which rune does not
-# carry. The word must also carry at least two Latin letters, not one. A single
-# Latin letter next to a look-alike is science notation, not a spoofed word: the
-# H-alpha spectral line, the K-alpha X-ray, the electron neutrino nu_e, rho_c,
-# all of which pair one Latin letter with a real Greek alpha, nu, rho, iota or
-# kappa that happen to share a Latin twin in the table below. A spoofed
-# identifier ("account", "config", "proxy") always carries several Latin letters,
-# so the two-letter floor drops the notation without losing a real homoglyph.
+# carry. One exception keeps honest science notation quiet: a bare two-character
+# token that pairs a single Latin letter with one look-alike is a symbol, not a
+# spoof - the H-alpha spectral line written "Ha", the K-alpha X-ray, the electron
+# neutrino nu_e, rho_c, each a real Greek alpha, nu, rho or kappa that happens to
+# share a Latin twin in the table below. A spoofed identifier is a longer word,
+# even one disguised down to its last Latin letter ("proxy" with p, o, x and y
+# all Cyrillic), so only the two-character notation pair is exempt and every real
+# homoglyph still fires.
 #
 # The table is keyed by codepoint, not by literal characters. A literal Cyrillic
 # "a" in this source would be the very thing the rule hunts - unreadable to a
@@ -204,10 +205,12 @@ _CONFUSABLE: dict[str, tuple[str, str]] = {
     chr(cp): (latin, script) for cp, latin, script in _CONFUSABLE_CODEPOINTS
 }
 
-# A spoofed word carries several Latin letters; a single Latin letter beside a
-# look-alike is science notation (H-alpha, nu_e). Two is the floor that keeps
-# the real homoglyphs and drops the notation.
-_MIN_LATIN_LETTERS = 2
+# A bare two-character token that pairs a single Latin letter with one look-alike
+# is science notation (the H-alpha line written "Ha", the neutrino "nu_e"), not a
+# spoofed word, so a token of exactly this shape is exempt. A spoofed identifier
+# is a longer word, even one disguised down to its last Latin letter, so it still
+# fires.
+_NOTATION_PAIR_LEN = 2
 
 
 def _is_latin_letter(ch: str) -> bool:
@@ -246,7 +249,13 @@ def _confusables(text: str) -> Iterator[Hit]:
             elif _is_latin_letter(ch):
                 latin_count += 1
             i += 1
-        if latin_count < _MIN_LATIN_LETTERS or not found:
+        if not found or latin_count == 0:
+            continue
+        # Exempt only a bare two-character notation pair (one Latin letter beside
+        # one look-alike): "Ha", "nu_e", "Ka", "rho_c". A spoofed identifier is a
+        # longer word, even one reduced to a single Latin letter ("proxy" with p,
+        # o, x and y all Cyrillic), so it clears this guard and still fires.
+        if i - start == _NOTATION_PAIR_LEN and latin_count == 1:
             continue
         ch = found[0]
         latin, script = _CONFUSABLE[ch]

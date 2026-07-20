@@ -29,6 +29,7 @@ a document-wide suppressor is a one-word bypass handed to the attacker.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterator
 
 from .models import Severity
@@ -91,6 +92,196 @@ def _invisible(text: str) -> Iterator[Hit]:
             i,
             1,
             f"{kind} U+{ord(ch):04X} hidden in metadata",
+        )
+
+
+# --- mixed-script confusables ------------------------------------------------
+#
+# The invisible-character rule catches text smuggled past a human with characters
+# that render as nothing. Its visible sibling is the homoglyph: a letter from
+# another alphabet that renders identically to a Latin one. U+0430 CYRILLIC SMALL
+# LETTER A is pixel-for-pixel a Latin "a", so a description reading
+# "send the api key to evil.tk" can carry a Cyrillic "a" that a reviewer's eye,
+# and every ASCII-based rule in this file, reads straight past. That is the point
+# of the trick twice over: it spoofs a tool's name to impersonate a trusted one
+# ("get_account" vs a Cyrillic-laced look-alike), and it slips a poisoned verb
+# past the exfiltration and instruction patterns here, which only ever match
+# Latin letters. Catching it closes an evasion of rune's own detections.
+#
+# The signal is a single word written in more than one alphabet. Honest text
+# keeps a word in one script: an English word is Latin throughout, a Russian word
+# Cyrillic throughout, and the two never interleave inside one token. A word that
+# mixes Latin letters with a Cyrillic or Greek look-alike is doing so on purpose.
+#
+# Precision, as everywhere in rune, comes from a closed list rather than a script
+# guess. Only the characters below, each a genuine look-alike for a specific Latin
+# letter, count as the foreign half. A word may be entirely Greek because it names
+# a symbol ("alpha", "sigma"), and a "kOhm" unit written with a real Greek omega
+# is not a homoglyph, so a Greek letter with no Latin twin (omega, pi, sigma) is
+# left out and never trips the rule. Missing an exotic confusable is a false
+# negative we accept, the same trade sensitive-file-access makes; firing on
+# honest Greek-symbol text is the false positive that would get the rule ignored.
+#
+# A word written ENTIRELY in confusables ("paypal" with every letter Cyrillic) is
+# not covered: with no Latin letter beside them it is indistinguishable from a
+# real Cyrillic word without a full transliteration model, which rune does not
+# carry. One exception keeps honest science notation quiet: a bare two-character
+# token that pairs a single Latin letter with one look-alike is a symbol, not a
+# spoof - the H-alpha spectral line written "Ha", the K-alpha X-ray, the electron
+# neutrino nu_e, rho_c, each a real Greek alpha, nu, rho or kappa that happens to
+# share a Latin twin in the table below. A spoofed identifier is a longer word,
+# even one disguised down to its last Latin letter ("proxy" with p, o, x and y
+# all Cyrillic), so only the two-character notation pair is exempt and every real
+# homoglyph still fires.
+#
+# The table is keyed by codepoint, not by literal characters. A literal Cyrillic
+# "a" in this source would be the very thing the rule hunts - unreadable to a
+# reviewer who cannot tell it from an ASCII "a" - so the whole file stays ASCII
+# and the look-alikes are named by number, the same discipline the invisible
+# rule follows.
+_CONFUSABLE_CODEPOINTS: tuple[tuple[int, str, str], ...] = (
+    # Cyrillic look-alikes for Latin letters (lowercase then uppercase).
+    (0x0430, "a", "Cyrillic"),
+    (0x0435, "e", "Cyrillic"),
+    (0x043E, "o", "Cyrillic"),
+    (0x0440, "p", "Cyrillic"),
+    (0x0441, "c", "Cyrillic"),
+    (0x0443, "y", "Cyrillic"),
+    (0x0445, "x", "Cyrillic"),
+    (0x0455, "s", "Cyrillic"),
+    (0x0456, "i", "Cyrillic"),
+    (0x0458, "j", "Cyrillic"),
+    (0x043A, "k", "Cyrillic"),
+    (0x0501, "d", "Cyrillic"),
+    (0x04BB, "h", "Cyrillic"),
+    (0x051B, "q", "Cyrillic"),
+    (0x051D, "w", "Cyrillic"),
+    (0x04CF, "l", "Cyrillic"),
+    (0x0475, "v", "Cyrillic"),
+    (0x0410, "A", "Cyrillic"),
+    (0x0412, "B", "Cyrillic"),
+    (0x0415, "E", "Cyrillic"),
+    (0x041A, "K", "Cyrillic"),
+    (0x041C, "M", "Cyrillic"),
+    (0x041D, "H", "Cyrillic"),
+    (0x041E, "O", "Cyrillic"),
+    (0x0420, "P", "Cyrillic"),
+    (0x0421, "C", "Cyrillic"),
+    (0x0422, "T", "Cyrillic"),
+    (0x0423, "Y", "Cyrillic"),
+    (0x0425, "X", "Cyrillic"),
+    (0x0406, "I", "Cyrillic"),
+    (0x0408, "J", "Cyrillic"),
+    (0x0405, "S", "Cyrillic"),
+    (0x051A, "Q", "Cyrillic"),
+    (0x051C, "W", "Cyrillic"),
+    # Greek look-alikes. Only letters with a real Latin twin; omega, pi, sigma
+    # and the rest are deliberately absent so honest symbol text stays quiet.
+    (0x03BF, "o", "Greek"),
+    (0x03C1, "p", "Greek"),
+    (0x03B1, "a", "Greek"),
+    (0x03BD, "v", "Greek"),
+    (0x03C5, "u", "Greek"),
+    (0x03B9, "i", "Greek"),
+    (0x03BA, "k", "Greek"),
+    (0x03C7, "x", "Greek"),
+    (0x0391, "A", "Greek"),
+    (0x0392, "B", "Greek"),
+    (0x0395, "E", "Greek"),
+    (0x0396, "Z", "Greek"),
+    (0x0397, "H", "Greek"),
+    (0x0399, "I", "Greek"),
+    (0x039A, "K", "Greek"),
+    (0x039C, "M", "Greek"),
+    (0x039D, "N", "Greek"),
+    (0x039F, "O", "Greek"),
+    (0x03A1, "P", "Greek"),
+    (0x03A4, "T", "Greek"),
+    (0x03A5, "Y", "Greek"),
+    (0x03A7, "X", "Greek"),
+)
+
+_CONFUSABLE: dict[str, tuple[str, str]] = {
+    chr(cp): (latin, script) for cp, latin, script in _CONFUSABLE_CODEPOINTS
+}
+
+# A bare two-character token that pairs a single Latin letter with one GREEK
+# look-alike is science notation (the H-alpha line written "Ha", the neutrino
+# "nu_e"), not a spoofed word, so a token of exactly this shape is exempt. The
+# exemption is Greek-only on purpose: scientific and mathematical symbols are
+# written in Greek, never in Cyrillic, so a Cyrillic look-alike beside a lone
+# Latin letter has no honest reading and still fires even at two characters. A
+# spoofed identifier is a longer word, even one disguised down to its last Latin
+# letter, so it too clears this guard.
+_NOTATION_PAIR_LEN = 2
+_NOTATION_SCRIPT = "Greek"
+
+
+def _is_latin_letter(ch: str) -> bool:
+    """Whether ch is a Latin-script letter (ASCII or accented).
+
+    ASCII is settled without a table lookup, which keeps the common all-ASCII
+    string a run of cheap comparisons. A non-ASCII letter is Latin only when its
+    Unicode name says so, which folds accented forms ("cafe" with an acute) into
+    the Latin bucket without pulling in Cyrillic or Greek.
+    """
+    if ord(ch) < 0x80:
+        return ch.isalpha()
+    if not ch.isalpha():
+        return False
+    try:
+        return unicodedata.name(ch).startswith("LATIN")
+    except ValueError:
+        return False
+
+
+@_emits("confusable-characters")
+def _confusables(text: str) -> Iterator[Hit]:
+    n = len(text)
+    i = 0
+    while i < n:
+        if not text[i].isalpha():
+            i += 1
+            continue
+        start = i
+        latin_count = 0
+        found: list[str] = []
+        while i < n and text[i].isalpha():
+            ch = text[i]
+            if ch in _CONFUSABLE:
+                found.append(ch)
+            elif _is_latin_letter(ch):
+                latin_count += 1
+            i += 1
+        if not found or latin_count == 0:
+            continue
+        # Exempt only a bare two-character notation pair of one Latin letter and
+        # one GREEK look-alike: "Ha", "nu_e", "Ka", "rho_c". The pair must be
+        # Greek, since scientific symbols are Greek and a Cyrillic look-alike
+        # beside a lone Latin letter ("os", "id", "ai" with a Cyrillic half) is a
+        # spoof with no honest reading. A spoofed identifier is otherwise a longer
+        # word, even one reduced to a single Latin letter ("proxy" with p, o, x
+        # and y all Cyrillic), so it clears this guard and still fires.
+        if (
+            i - start == _NOTATION_PAIR_LEN
+            and latin_count == 1
+            and _CONFUSABLE[found[0]][1] == _NOTATION_SCRIPT
+        ):
+            continue
+        ch = found[0]
+        latin, script = _CONFUSABLE[ch]
+        detail = (
+            f", plus {len(found) - 1} more look-alike character(s)"
+            if len(found) > 1
+            else ""
+        )
+        yield (
+            "confusable-characters",
+            Severity.HIGH,
+            start,
+            i - start,
+            f"a {script} character U+{ord(ch):04X} disguised as Latin "
+            f"'{latin}' inside a Latin word{detail}",
         )
 
 
@@ -717,6 +908,7 @@ def _regex_rule(
 
 _TEXT_RULES: tuple[TextRule, ...] = (
     _invisible,
+    _confusables,
     _regex_rule(
         "hidden-instructions",
         Severity.HIGH,

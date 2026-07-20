@@ -207,6 +207,12 @@ _SARIF_RULES: tuple[tuple[str, str, str], ...] = (
         "or [INST].",
         "warning",
     ),
+    (
+        "sensitive-file-access",
+        "A directive to read a well-known credential or secret file, such as an "
+        "SSH private key or cloud credentials.",
+        "error",
+    ),
 )
 
 _RULE_INDEX = {rule_id: i for i, (rule_id, _, _) in enumerate(_SARIF_RULES)}

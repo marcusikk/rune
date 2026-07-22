@@ -508,6 +508,16 @@ rune is a signal for human review, not a proof of safety.
   own `instructions` and `serverInfo` from the handshake. It never calls a tool,
   renders a prompt, or reads a resource's body, so nothing the server can execute
   is triggered. Resource contents fetched at runtime are out of scope.
+- Metadata rune parses is metadata rune scans, however deeply it nests. The
+  scan walks a schema on its own stack rather than by recursion, so a listing
+  nested past Python's recursion limit is read to the bottom instead of taking
+  the run down with it. Input the JSON decoder itself will not read, which is
+  far deeper still and is not metadata any MCP client could load either, exits
+  `2` saying so. Nesting never turns into a traceback, and never into a CLEAN
+  over text rune skipped. A JSON path from that far down is thousands of
+  characters long, so the text report keeps its two ends and elides the middle;
+  `--json`, SARIF and the baseline carry the whole path, which is what
+  identifies a finding.
 - It is pattern-based, with no model in the loop. It will not resolve arbitrary
   pronoun references or paraphrase, so a determined attacker can phrase around
   it. Treat a clean result as "no known trick found", not "safe".

@@ -132,6 +132,23 @@ def _load_manifest(path: str, stdin: TextIO) -> dict[str, list[dict[str, Any]]]:
 # caller re-raises the original JSON error rather than a misleading SSE one.
 _NO_SSE = object()
 
+_TOO_DEEP = "JSON nests deeper than the parser will read; nothing in it was scanned"
+
+
+def _loads(text: str) -> Any:
+    """json.loads, with over-deep nesting reported as a plain input error.
+
+    The decoder gives up on very deep nesting by raising RecursionError, which
+    is not a JSONDecodeError and so used to reach the top as a traceback and an
+    exit code that reads like a finding. Untrusted input is exactly what this
+    parser is pointed at, so the depth it refuses is an ordinary malformed-input
+    verdict: a named exit 2, never a crash and never a quiet skip.
+    """
+    try:
+        return json.loads(text)
+    except RecursionError as exc:
+        raise ValueError(_TOO_DEEP) from exc
+
 
 def _parse_document(text: str) -> Any:
     """Parse the input as JSON, falling back to an SSE (text/event-stream) reply.
@@ -145,7 +162,7 @@ def _parse_document(text: str) -> Any:
     the same _normalize path as a plain body, so nothing downstream changes.
     """
     try:
-        return json.loads(text)
+        return _loads(text)
     except json.JSONDecodeError:
         payload = _sse_payload(text)
         if payload is _NO_SSE:
@@ -194,7 +211,9 @@ def _sse_payload(text: str) -> Any:
     malformed JSON file still surfaces its own parse error rather than a
     confusing one about event streams. A stream that does carry frames but no
     JSON, or that carries more than one JSON-RPC response, is a loud error: a
-    gate must never quietly pick one reply and skip a poisoned sibling. Server
+    gate must never quietly pick one reply and skip a poisoned sibling. A frame
+    that is JSON but nests too deep to read is loud for the same reason: it is
+    a message rune failed to read, not one it decided was not JSON. Server
     notifications (no ``result``/``error``) are ignored so a keep-alive or a
     progress event beside the real reply does not read as ambiguity.
     """
@@ -204,7 +223,7 @@ def _sse_payload(text: str) -> Any:
     scannable: list[Any] = []
     for chunk in data_events:
         try:
-            message = json.loads(chunk)
+            message = _loads(chunk)
         except json.JSONDecodeError:
             continue
         if isinstance(message, dict | list):
@@ -297,12 +316,15 @@ def _envelope_groups(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
 
     An MCP "tools/list" reply is a JSON-RPC envelope: the real listing sits
     under "result", beside "jsonrpc" and "id". This merges the object's own
-    listings with those inside a "result" envelope, recursing so a
+    listings with those inside a "result" envelope, following the chain so a
     doubly-wrapped "result".result" is still reached. The union is taken per
     kind rather than letting either side suppress the other: a spec-compliant
     client reads "result", so a clean top-level decoy beside a poisoned "result"
-    must not hide the poison. Top-level lists are copied before extending so a
+    must not hide the poison. Entities are collected into fresh lists, so a
     merge never mutates the caller's data in place.
+
+    The chain is followed by a loop, not by recursion, for the same reason the
+    metadata walk is: the depth is chosen by whoever wrote the input.
 
     This never raises on the "no listing anywhere" case; that verdict belongs to
     the single caller, which can then point the error at the whole file. A
@@ -316,12 +338,12 @@ def _envelope_groups(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     JSON-RPC initialize reply with those fields hidden under "result" is still a
     named error rather than a silent miss.
     """
-    groups = _listing_groups(data)
-    inner = data.get("result")
-    if isinstance(inner, dict):
-        groups = {kind: list(entities) for kind, entities in groups.items()}
-        for kind, entities in _envelope_groups(inner).items():
+    groups: dict[str, list[dict[str, Any]]] = {}
+    node: Any = data
+    while isinstance(node, dict):
+        for kind, entities in _listing_groups(node).items():
             groups.setdefault(kind, []).extend(entities)
+        node = node.get("result")
     return groups
 
 

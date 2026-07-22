@@ -40,6 +40,23 @@ def _scanned_clause(results: list[ToolResult]) -> str:
     return ", ".join(parts) + " scanned"
 
 
+# A JSON path only reads as a location while it fits on a line or two. Metadata
+# nested hundreds of levels deep produces one thousands of characters long, and
+# printed whole it buries the finding it is labelling. The text report keeps both
+# ends, so the field name at the tail (the part that says what was poisoned) is
+# still there. Only this report clips: --json, SARIF and the baseline carry the
+# full path, which is what identifies a finding across runs.
+_PATH_LIMIT = 120
+_PATH_HEAD = 60
+_PATH_TAIL = _PATH_LIMIT - _PATH_HEAD - len("...")
+
+
+def _short_path(path: str) -> str:
+    if len(path) <= _PATH_LIMIT:
+        return path
+    return f"{path[:_PATH_HEAD]}...{path[-_PATH_TAIL:]}"
+
+
 def render_text(results: list[ToolResult], *, color: bool = False, baselined: int = 0) -> str:
     lines: list[str] = []
     total_findings = sum(len(r.findings) for r in results)
@@ -49,7 +66,11 @@ def render_text(results: list[ToolResult], *, color: bool = False, baselined: in
         lines.append(_paint(r.band, header, color))
         for f in r.findings:
             tag = f"[{f.severity.label.upper()}]"
-            location = f"{f.path} (offset {f.offset})" if f.path else f"offset {f.offset}"
+            location = (
+                f"{_short_path(f.path)} (offset {f.offset})"
+                if f.path
+                else f"offset {f.offset}"
+            )
             lines.append(f"  {tag} {f.rule}  {location}")
             lines.append(f"      {f.message}")
             lines.append(f"      > {f.excerpt}")

@@ -148,12 +148,19 @@ def scan_tools(tools: list[dict[str, Any]]) -> list[ToolResult]:
     return scan_targets({"tool": tools})
 
 
-def scan_targets(groups: dict[str, list[dict[str, Any]]]) -> list[ToolResult]:
+def scan_targets(
+    groups: dict[str, list[dict[str, Any]]], *, source: str | None = None
+) -> list[ToolResult]:
     """Scan every entity across the kinds, grouped by kind, highest risk first.
 
     Kinds are reported tools-then-prompts-then-resources, and within a kind the
     riskiest entity leads. Grouping keeps the kind labels clustered instead of
     interleaving a low-scoring prompt between two tools.
+
+    ``source`` is the name of the server these groups were listed from, set only
+    when one run covers several servers. It is stamped on every result here, at
+    the one place a scan is turned into results, so no caller can produce a
+    result that has lost track of which server it describes.
     """
     results: list[ToolResult] = []
     for kind in KINDS:
@@ -163,4 +170,7 @@ def scan_targets(groups: dict[str, list[dict[str, Any]]]) -> list[ToolResult]:
         ]
         group.sort(key=lambda r: (-r.score, r.name))
         results.extend(group)
+    if source is not None:
+        for result in results:
+            result.source = source
     return results

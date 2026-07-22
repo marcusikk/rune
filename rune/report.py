@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .baseline import BaselineEntry, fingerprint
-from .models import Finding, ToolResult
+from .models import Finding, SourceStatus, ToolResult
 from .pin import Drift
 from .scan import render_visible
 
@@ -18,6 +18,10 @@ _COLORS = {
     "CLEAN": "\033[32m",
 }
 _RESET = "\033[0m"
+
+# Bands from least to most severe, so a section heading can take the colour of
+# the worst entity under it.
+_BANDS = ("CLEAN", "LOW", "MEDIUM", "HIGH")
 
 
 def _paint(band: str, text: str, color: bool) -> str:
@@ -41,8 +45,8 @@ def _scanned_clause(results: list[ToolResult]) -> str:
     return ", ".join(parts) + " scanned"
 
 
-def render_text(results: list[ToolResult], *, color: bool = False, baselined: int = 0) -> str:
-    """Render the human report.
+def _entity_lines(r: ToolResult, color: bool) -> list[str]:
+    """The block of report lines for one scanned entity.
 
     The entity name and the JSON path are the server's text, not rune's: the
     name is whatever the manifest called the tool, and the path is built from
@@ -53,29 +57,122 @@ def render_text(results: list[ToolResult], *, color: bool = False, baselined: in
     identity on every name and path that does not contain one, so an ordinary
     report is unchanged.
     """
-    lines: list[str] = []
-    total_findings = sum(len(r.findings) for r in results)
+    header = f"{r.kind} {render_visible(r.name)}  risk {r.score}/100  [{r.band}]"
+    lines = [_paint(r.band, header, color)]
+    for f in r.findings:
+        tag = f"[{f.severity.label.upper()}]"
+        path = render_visible(f.path)
+        location = f"{path} (offset {f.offset})" if path else f"offset {f.offset}"
+        lines.append(f"  {tag} {f.rule}  {location}")
+        lines.append(f"      {f.message}")
+        lines.append(f"      > {f.excerpt}")
+    lines.append("")
+    return lines
 
-    for r in results:
-        header = f"{r.kind} {render_visible(r.name)}  risk {r.score}/100  [{r.band}]"
-        lines.append(_paint(r.band, header, color))
-        for f in r.findings:
-            tag = f"[{f.severity.label.upper()}]"
-            path = render_visible(f.path)
-            location = f"{path} (offset {f.offset})" if path else f"offset {f.offset}"
-            lines.append(f"  {tag} {f.rule}  {location}")
-            lines.append(f"      {f.message}")
-            lines.append(f"      > {f.excerpt}")
-        lines.append("")
 
+def _summary(results: list[ToolResult], baselined: int) -> str:
     flagged = sum(1 for r in results if r.findings)
+    total_findings = sum(len(r.findings) for r in results)
     summary = (
         f"{_scanned_clause(results)}, {flagged} flagged, "
         f"{total_findings} finding(s)."
     )
     if baselined:
         summary += f" {baselined} baselined."
-    lines.append(summary)
+    return summary
+
+
+def _roll_call(sources: Sequence[SourceStatus], config: str) -> str:
+    """How many of the config's servers this run actually opened.
+
+    Its own line, above the findings summary and naming the config file, because
+    the per-kind clause below it already counts ``server`` entities: the
+    handshake metadata of one server. Two counts of two different things sharing
+    a word in one sentence is how a reader comes away thinking three of five
+    servers were poisoned when three of five were never opened.
+    """
+    scanned = sum(1 for s in sources if s.ok)
+    line = f"{scanned} of {len(sources)} server(s) in {config} scanned"
+    counts = [
+        (sum(1 for s in sources if s.status == "failed"), "failed"),
+        (sum(1 for s in sources if s.status == "disabled"), "disabled"),
+    ]
+    extra = ", ".join(f"{n} {label}" for n, label in counts if n)
+    return f"{line}, {extra}." if extra else f"{line}."
+
+
+def render_text(results: list[ToolResult], *, color: bool = False, baselined: int = 0) -> str:
+    """Render the human report for a scan of one server."""
+    lines: list[str] = []
+    for r in results:
+        lines.extend(_entity_lines(r, color))
+    lines.append(_summary(results, baselined))
+    return "\n".join(lines)
+
+
+def render_config_text(
+    results: list[ToolResult],
+    sources: Sequence[SourceStatus],
+    config: str,
+    *,
+    color: bool = False,
+    baselined: int = 0,
+) -> str:
+    """Render the human report for a scan that covered several servers.
+
+    Sections follow the order the config listed the servers in, which is the
+    order its reader already knows, and every requested server gets a section
+    whether or not it produced anything. A server that failed to start, one the
+    config had switched off, and one that listed no metadata at all each say so
+    under their own heading. The alternative, printing only the servers that
+    returned results, would let a server drop out of an audit without the report
+    ever mentioning it.
+
+    A config's name for a server is text out of a file, so it is escaped in the
+    heading exactly as an entity name is in the line below it.
+    """
+    by_source: dict[str, list[ToolResult]] = {}
+    for r in results:
+        by_source.setdefault(r.source or "", []).append(r)
+
+    lines: list[str] = []
+    for status in sources:
+        section = by_source.get(status.name, [])
+        band = max((r.band for r in section), key=_BANDS.index, default="CLEAN")
+        lines.append(
+            _paint(band, f"=== {render_visible(status.name)} ({status.transport}) ===", color)
+        )
+        if status.status == "disabled":
+            lines.extend(["  not scanned: disabled in the config", ""])
+            continue
+        if status.status == "failed":
+            lines.extend([f"  not scanned: {render_visible(status.error or '')}", ""])
+            continue
+        if not section:
+            lines.extend(["  no tools, prompts, resources or server metadata listed", ""])
+            continue
+        for r in section:
+            lines.extend(_entity_lines(r, color))
+
+    lines.append(_roll_call(sources, config))
+    lines.append(_summary(results, baselined))
+    return "\n".join(lines)
+
+
+def render_source_notice(sources: Sequence[SourceStatus]) -> str:
+    """Name the servers a multi-server run did not scan, and why.
+
+    On stderr in every output mode, for the reason the stale-baseline and drift
+    notices are: it is a statement about the run rather than a finding about a
+    server, so it must not land inside piped --json or --sarif, and it must still
+    be seen there. The exit code says the audit was incomplete; this says which
+    servers made it so.
+    """
+    skipped = [s for s in sources if not s.ok]
+    lines = [f"rune: {len(skipped)} of {len(sources)} server(s) were not scanned:"]
+    for s in skipped:
+        why = "disabled in the config" if s.status == "disabled" else (s.error or "")
+        lines.append(f"  {render_visible(s.name)}: {render_visible(why)}")
     return "\n".join(lines)
 
 
@@ -129,7 +226,7 @@ def render_drift_notice(drifts: Sequence[Drift]) -> str:
 
 
 def _entity_json(r: ToolResult) -> dict[str, Any]:
-    return {
+    entity: dict[str, Any] = {
         "name": r.name,
         "score": r.score,
         "band": r.band,
@@ -145,6 +242,11 @@ def _entity_json(r: ToolResult) -> dict[str, Any]:
             for f in r.findings
         ],
     }
+    # Present only on a --config scan, so the shape a single-server scan emits
+    # is exactly what it has always been.
+    if r.source is not None:
+        entity["source"] = r.source
+    return entity
 
 
 def to_json(
@@ -153,6 +255,7 @@ def to_json(
     baselined: int = 0,
     stale: Sequence[BaselineEntry] = (),
     drifts: Sequence[Drift] = (),
+    sources: Sequence[SourceStatus] = (),
 ) -> dict[str, Any]:
     # Grouped by kind so the "tools" array keeps its existing shape and prompts
     # and resources appear alongside it rather than mixed in.
@@ -172,6 +275,11 @@ def to_json(
         # The pin differences in machine-readable form, so a pipeline can tell a
         # changed description from a tool that was added without parsing stderr.
         "pinDrift": [drift.as_dict() for drift in drifts],
+        # Every server a --config run was asked to cover, scanned or not, in
+        # config order. A consumer that only counted the entities below would
+        # read a server that failed to start as a server with nothing to report.
+        # Empty for a scan of a single server, which has no roll call to give.
+        "sources": [status.as_dict() for status in sources],
         "summary": {
             "tools": len(grouped["tool"]),
             "prompts": len(grouped["prompt"]),
@@ -182,6 +290,8 @@ def to_json(
             "baselined": baselined,
             "staleBaseline": len(stale),
             "pinDrift": len(drifts),
+            "sources": len(sources),
+            "sourcesScanned": sum(1 for status in sources if status.ok),
         },
     }
 
@@ -192,9 +302,10 @@ def render_json(
     baselined: int = 0,
     stale: Sequence[BaselineEntry] = (),
     drifts: Sequence[Drift] = (),
+    sources: Sequence[SourceStatus] = (),
 ) -> str:
     return json.dumps(
-        to_json(results, baselined=baselined, stale=stale, drifts=drifts),
+        to_json(results, baselined=baselined, stale=stale, drifts=drifts, sources=sources),
         indent=2,
         ensure_ascii=True,
     )
@@ -306,6 +417,11 @@ def _sarif_result(r: ToolResult, f: Finding, uri: str | None) -> dict[str, Any]:
     if uri is not None:
         location["physicalLocation"] = {"artifactLocation": {"uri": uri}}
 
+    # On a --config scan the server's name leads the alert text, because the
+    # same tool name can come from two servers in one log and a triager has to
+    # be able to tell which one this is. Escaped, like every other piece of
+    # scanned text that lands in a sentence a human reads.
+    where = f"{render_visible(r.source)} / " if r.source is not None else ""
     result: dict[str, Any] = {
         "ruleId": f.rule,
         "level": _SARIF_LEVELS.get(f.severity.label, "warning"),
@@ -320,23 +436,66 @@ def _sarif_result(r: ToolResult, f: Finding, uri: str | None) -> dict[str, Any]:
         # finding's data and a tool matching on them must see what was sent.
         "message": {
             "text": (
-                f"{r.kind} {render_visible(r.name)}: {f.message}. "
+                f"{where}{r.kind} {render_visible(r.name)}: {f.message}. "
                 f"Flagged text: {render_visible(f.match)}"
             )
         },
         "locations": [location],
         # Baseline and SARIF agree on identity, so a result carries the same id
-        # here that --baseline would suppress it by.
-        "partialFingerprints": {"runeFingerprint/v1": fingerprint(r.name, f, kind=r.kind)},
+        # here that --baseline would suppress it by. That includes the source on
+        # a --config scan: without it two servers exposing an identically named
+        # tool with the same finding would collapse into one alert upstream.
+        "partialFingerprints": {
+            "runeFingerprint/v1": fingerprint(r.name, f, kind=r.kind, source=r.source)
+        },
         "properties": {"kind": r.kind, "target": r.name, "score": r.score, "band": r.band},
     }
+    if r.source is not None:
+        result["properties"]["source"] = r.source
     if f.rule in _RULE_INDEX:
         result["ruleIndex"] = _RULE_INDEX[f.rule]
     return result
 
 
+def _sarif_invocation(sources: Sequence[SourceStatus]) -> dict[str, Any]:
+    """Record which servers a config run could not open, in SARIF's own terms.
+
+    An empty results array tells the platform to clear the alerts it raised
+    before. That is right for a server rune scanned and found clean, and exactly
+    wrong for one that would not start: without this, a server that quietly stops
+    starting would have its old alerts cleared as if it had been re-audited.
+    ``executionSuccessful`` is what says the run was partial, and the
+    notifications name which servers made it so.
+    """
+    notifications = [
+        {
+            "level": "error" if s.status == "failed" else "note",
+            "message": {
+                "text": (
+                    f"server {render_visible(s.name)} was not scanned: "
+                    + (
+                        "disabled in the config"
+                        if s.status == "disabled"
+                        else render_visible(s.error or "unknown reason")
+                    )
+                )
+            },
+        }
+        for s in sources
+        if not s.ok
+    ]
+    return {
+        "executionSuccessful": not any(s.status == "failed" for s in sources),
+        "toolExecutionNotifications": notifications,
+    }
+
+
 def to_sarif(
-    results: list[ToolResult], *, uri: str | None = None, version: str = "0.1.0"
+    results: list[ToolResult],
+    *,
+    uri: str | None = None,
+    version: str = "0.1.0",
+    sources: Sequence[SourceStatus] = (),
 ) -> dict[str, Any]:
     """Build a SARIF 2.1.0 log from scan results.
 
@@ -345,18 +504,36 @@ def to_sarif(
     which have no file on disk; those results carry only their JSON-path logical
     location. A fully clean scan produces an empty ``results`` array, which is a
     valid log and tells the platform to clear any alerts it had cleared before.
+
+    ``sources`` is the per-server roll call of a ``--config`` run, which becomes
+    an ``invocations`` entry. It is left off entirely for a single-server scan,
+    so that log is byte for byte what it has always been.
     """
     sarif_results = [
         _sarif_result(r, f, uri) for r in results for f in r.findings
     ]
+    run: dict[str, Any] = {
+        "tool": {"driver": _sarif_driver(version)},
+        "results": sarif_results,
+    }
+    if sources:
+        run["invocations"] = [_sarif_invocation(sources)]
     return {
         "$schema": _SARIF_SCHEMA,
         "version": "2.1.0",
-        "runs": [{"tool": {"driver": _sarif_driver(version)}, "results": sarif_results}],
+        "runs": [run],
     }
 
 
 def render_sarif(
-    results: list[ToolResult], *, uri: str | None = None, version: str = "0.1.0"
+    results: list[ToolResult],
+    *,
+    uri: str | None = None,
+    version: str = "0.1.0",
+    sources: Sequence[SourceStatus] = (),
 ) -> str:
-    return json.dumps(to_sarif(results, uri=uri, version=version), indent=2, ensure_ascii=True)
+    return json.dumps(
+        to_sarif(results, uri=uri, version=version, sources=sources),
+        indent=2,
+        ensure_ascii=True,
+    )

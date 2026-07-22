@@ -1390,14 +1390,15 @@ def test_cleartext_warning_never_prints_the_secret() -> None:
     assert "s3cret" not in warning
 
 
-def test_sarif_uri_strips_credentials_from_the_url() -> None:
-    # A SARIF log gets uploaded and kept. A token that rode in the query string
-    # or in userinfo must not be written into it beside the findings.
-    from rune.cli import _sarif_uri
+def test_public_url_strips_credentials_from_the_url() -> None:
+    # A SARIF log gets uploaded and kept, and an error message is read off a
+    # terminal or out of a CI log. A token that rode in the query string or in
+    # userinfo must not be written into either beside the findings.
+    from rune.cli import _public_url
 
-    assert _sarif_uri("https://u:pw@example.com/mcp?api_key=s3cret") == "https://example.com/mcp"
-    assert _sarif_uri("http://127.0.0.1:8931/mcp") == "http://127.0.0.1:8931/mcp"
-    assert _sarif_uri("https://example.com/mcp") == "https://example.com/mcp"
+    assert _public_url("https://u:pw@example.com/mcp?api_key=s3cret") == "https://example.com/mcp"
+    assert _public_url("http://127.0.0.1:8931/mcp") == "http://127.0.0.1:8931/mcp"
+    assert _public_url("https://example.com/mcp") == "https://example.com/mcp"
 
 
 # --sse argument handling. It shares --http's URL, header, cleartext-warning and

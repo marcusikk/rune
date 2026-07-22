@@ -8,6 +8,7 @@ from typing import Any
 
 from .baseline import BaselineEntry, fingerprint
 from .models import Finding, ToolResult
+from .pin import Drift
 from .scan import render_visible
 
 _COLORS = {
@@ -90,6 +91,27 @@ def render_stale_notice(stale: Sequence[BaselineEntry]) -> str:
     return "\n".join(lines)
 
 
+def render_drift_notice(drifts: Sequence[Drift]) -> str:
+    """Name the metadata that no longer matches the pin, and how to act on it.
+
+    On stderr in every output mode, for the same reason the stale notice is: it
+    is a statement about a file on disk next to the scan, not a finding about the
+    scanned server, so it must not land inside piped --json or --sarif, and it
+    must still be visible there.
+
+    Entity names and JSON paths come from the server, so they are escaped the
+    same way a finding's excerpt is. A tool named with an embedded newline must
+    not be able to forge a line of rune's own output.
+    """
+    lines = [f"rune: {len(drifts)} pinned entity(s) no longer match the pin:"]
+    lines.extend(f"  {render_visible(d.label)}" for d in drifts)
+    lines.append(
+        "rune: read the change before accepting it; re-run with --write-pin to "
+        "pin the metadata as it is now"
+    )
+    return "\n".join(lines)
+
+
 def _entity_json(r: ToolResult) -> dict[str, Any]:
     return {
         "name": r.name,
@@ -114,6 +136,7 @@ def to_json(
     *,
     baselined: int = 0,
     stale: Sequence[BaselineEntry] = (),
+    drifts: Sequence[Drift] = (),
 ) -> dict[str, Any]:
     # Grouped by kind so the "tools" array keeps its existing shape and prompts
     # and resources appear alongside it rather than mixed in.
@@ -130,6 +153,9 @@ def to_json(
         # carries the same fields the baseline file recorded, so an entry here
         # can be matched straight back to the line it came from.
         "staleBaseline": [entry.as_dict() for entry in stale],
+        # The pin differences in machine-readable form, so a pipeline can tell a
+        # changed description from a tool that was added without parsing stderr.
+        "pinDrift": [drift.as_dict() for drift in drifts],
         "summary": {
             "tools": len(grouped["tool"]),
             "prompts": len(grouped["prompt"]),
@@ -139,6 +165,7 @@ def to_json(
             "findings": sum(len(r.findings) for r in results),
             "baselined": baselined,
             "staleBaseline": len(stale),
+            "pinDrift": len(drifts),
         },
     }
 
@@ -148,9 +175,12 @@ def render_json(
     *,
     baselined: int = 0,
     stale: Sequence[BaselineEntry] = (),
+    drifts: Sequence[Drift] = (),
 ) -> str:
     return json.dumps(
-        to_json(results, baselined=baselined, stale=stale), indent=2, ensure_ascii=True
+        to_json(results, baselined=baselined, stale=stale, drifts=drifts),
+        indent=2,
+        ensure_ascii=True,
     )
 
 

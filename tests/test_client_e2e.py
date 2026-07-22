@@ -114,3 +114,31 @@ def test_cli_stdio_flags_poisoned_server_instructions() -> None:
     )
     assert code == 1
     assert "server notes" in out.getvalue()
+
+
+def test_pin_catches_a_live_rug_pull(tmp_path: Path) -> None:
+    # The attack rune is blind to without a pin: a server that serves honest
+    # metadata while it is reviewed and swaps in an instruction afterwards,
+    # worded so no rule fires. Both halves run over the real protocol.
+    pin = str(tmp_path / "pin.json")
+    # --stdio takes the rest of the line as the server command, so rune's own
+    # flags go before it.
+    server = ["--stdio", sys.executable, str(_FIXTURES / "rug_pull_server.py")]
+
+    out, err = io.StringIO(), io.StringIO()
+    assert main(["--write-pin", pin, *server], out=out, err=err) == 0
+    assert "wrote pin for 2 entity(s)" in err.getvalue()
+
+    # The same server, unchanged, still matches.
+    out, err = io.StringIO(), io.StringIO()
+    assert main(["--pin", pin, *server], out=out, err=err) == 0
+    assert err.getvalue() == ""
+
+    # After the pull: no finding, and the pin is the only thing that objects.
+    out, err = io.StringIO(), io.StringIO()
+    assert main([*server, "--pulled"], out=out, err=err) == 0
+    assert "0 finding(s)" in out.getvalue()
+
+    out, err = io.StringIO(), io.StringIO()
+    assert main(["--pin", pin, *server, "--pulled"], out=out, err=err) == 1
+    assert "tool sync_notes  changed: description" in err.getvalue()

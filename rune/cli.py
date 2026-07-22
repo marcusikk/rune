@@ -549,22 +549,33 @@ def main(
         if warning:
             print(warning, file=err)
 
-    if args.baseline and args.write_baseline:
-        print("rune: use --baseline or --write-baseline, not both", file=err)
+    # A run that writes an artifact records the scan instead of judging it: it
+    # reports nothing and exits 0 by design. A judging flag passed alongside one
+    # is therefore a gate that is accepted and then never runs, and the exit code
+    # reports success for a check nobody made. Refused as a whole matrix rather
+    # than pair by pair, so a flag added to either side later cannot quietly
+    # open a cell.
+    judging = [
+        flag
+        for flag, given in (("--baseline", args.baseline), ("--pin", args.pin))
+        if given
+    ]
+    writing = [
+        flag
+        for flag, given in (
+            ("--write-baseline", args.write_baseline),
+            ("--write-pin", args.write_pin),
+        )
+        if given
+    ]
+    if judging and writing:
+        # One pair is enough to explain the refusal, so the message names the
+        # first of each rather than listing a combination nobody typed on purpose.
+        print(f"rune: use {judging[0]} or {writing[0]}, not both", file=err)
         return _EXIT_ERROR
 
     if args.fail_on_stale_baseline and not args.baseline:
         print("rune: --fail-on-stale-baseline only applies to --baseline", file=err)
-        return _EXIT_ERROR
-
-    # A run that writes an artifact records the scan instead of judging it, so it
-    # would accept the --pin file and then never read it. Say so rather than
-    # exiting 0 on a gate that silently did not run.
-    if args.pin and (args.write_pin or args.write_baseline):
-        print(
-            "rune: --pin cannot be combined with --write-pin or --write-baseline",
-            file=err,
-        )
         return _EXIT_ERROR
 
     if args.json and args.sarif:

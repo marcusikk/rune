@@ -76,8 +76,18 @@ def digest(text: str) -> str:
     Just the text. The JSON path it was found at is the key this is stored
     under, and comparison is per path, so hashing the path in as well would
     change no outcome anywhere.
+
+    Encoded with surrogatepass because the text is the server's, not ours. JSON
+    allows the escape \\ud800, Python's parser hands that back as a lone
+    surrogate, and a plain encode() raises on one. Such a manifest scans fine
+    and exits 0 today, so a strict encode here would turn working input into a
+    traceback and leave that server the one server nobody can pin, which an
+    attacker picks deliberately. surrogatepass gives a surrogate the three bytes
+    no valid character encodes to, so distinct strings keep distinct digests, and
+    text that already encoded encodes to the same bytes as before: pins written
+    by an earlier build stay valid, and no format bump is owed.
     """
-    return hashlib.sha256(text.encode()).hexdigest()
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _entity_fields(entity: dict[str, Any]) -> dict[str, str]:

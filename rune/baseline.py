@@ -62,12 +62,20 @@ def fingerprint(name: str, finding: Finding, *, kind: str = "tool") -> str:
     server finding lives in a separate namespace from a same-named tool. It is
     left out for tools, which keeps a tool fingerprint identical to the ones
     every existing baseline was written with.
+
+    Encoded with surrogatepass for the reason ``pin.digest`` is: the name, path
+    and matched text are the server's, and a manifest may legally carry an
+    unpaired surrogate that a plain encode() refuses. That manifest scans and
+    reports fine, so a strict encode here would leave --write-baseline and
+    --sarif, which fingerprints every result, raising on input the rest of rune
+    handles. surrogatepass changes no digest of text that already encoded, so
+    every baseline on disk stays valid and _FORMAT_VERSION does not move.
     """
     parts = (name, finding.rule, finding.path, finding.match)
     if kind != "tool":
         parts = (kind, *parts)
     joined = "\x00".join(parts)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    return hashlib.sha256(joined.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def build_baseline(results: list[ToolResult]) -> dict[str, Any]:

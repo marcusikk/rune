@@ -572,6 +572,14 @@ rune is a signal for human review, not a proof of safety.
   own `instructions` and `serverInfo` from the handshake. It never calls a tool,
   renders a prompt, or reads a resource's body, so nothing the server can execute
   is triggered. Resource contents fetched at runtime are out of scope.
+- The report is rune's own text. An entity name and a JSON path both come out of
+  the manifest being audited, so they are escaped in the text report exactly as a
+  flagged excerpt is: a tool named with an embedded newline cannot write a line
+  that reads as rune's verdict, a terminal escape sequence never reaches your
+  terminal, and metadata carrying an unpaired surrogate is reported rather than
+  ending the run. `--json`, SARIF's structured fields, and the baseline and pin
+  files keep the server's exact text instead, since a program reading those needs
+  what was actually sent.
 - It is pattern-based, with no model in the loop. It will not resolve arbitrary
   pronoun references or paraphrase, so a determined attacker can phrase around
   it. Treat a clean result as "no known trick found", not "safe". `--pin` is the

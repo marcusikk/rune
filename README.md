@@ -515,7 +515,8 @@ rune is a signal for human review, not a proof of safety.
   far deeper still and is not metadata any MCP client could load either, exits
   `2` saying so. Nesting never turns into a traceback, and never into a CLEAN
   over text rune skipped. A JSON path from that far down is thousands of
-  characters long, so the text report keeps its two ends and elides the middle;
+  characters long, so the lines rune prints for a human keep their two ends and
+  elide the middle;
   `--json`, SARIF and the baseline carry the whole path, which is what
   identifies a finding.
 - It is pattern-based, with no model in the loop. It will not resolve arbitrary

@@ -1513,19 +1513,43 @@ def _decoder_ceiling() -> int:
     return lo
 
 
-def _readable_but_deep() -> int:
+# Slack for the levels a fixture wraps around its repeated unit: the array, the
+# tool object, its inputSchema and the innermost description object.
+_FIXTURE_WRAPPER_LEVELS = 8
+
+
+def _deep_units(ceiling: int, limit: int, levels_per_unit: int) -> int | None:
+    """Repeats of a fixture unit that parse but would sink a recursive walk.
+
+    `_decoder_ceiling` counts json levels, and a fixture unit is not always one
+    level: `_nested_manifest` emits two per repeat. Both sides of this sum are
+    therefore in levels, and the caller says how many its unit costs. Measuring
+    the ceiling in one unit and spending it in another puts the fixture past the
+    decoder on any interpreter whose ceiling is not ten times the recursion
+    limit, which is the hard-coded fragility the runtime probe exists to avoid.
+
+    None when this interpreter has no such window, i.e. when the deepest input
+    it will parse is not deeper than a recursive walk survives.
+    """
+    units = min((ceiling - _FIXTURE_WRAPPER_LEVELS) // levels_per_unit, limit * 3)
+    if units * levels_per_unit <= limit:
+        return None
+    return units
+
+
+def _readable_but_deep(levels_per_unit: int = 1) -> int:
     """A depth the decoder reads and a recursive walk would not survive."""
-    limit = sys.getrecursionlimit()
-    if _decoder_ceiling() <= limit:
+    units = _deep_units(_decoder_ceiling(), sys.getrecursionlimit(), levels_per_unit)
+    if units is None:
         pytest.skip("this decoder refuses nesting past the recursion limit")
-    return min(_decoder_ceiling(), limit * 3)
+    return units
 
 
 def test_manifest_deeper_than_the_recursion_limit_is_scanned(tmp_path: Path) -> None:
     # Past what a recursive walk survives, inside what the decoder accepts: the
     # window where a manifest parses and then used to take the scan down.
     path = tmp_path / "deep.json"
-    path.write_text(_nested_manifest(_readable_but_deep()), encoding="utf-8")
+    path.write_text(_nested_manifest(_readable_but_deep(2)), encoding="utf-8")
     code, out, err = _run([str(path)])
     assert code == 1
     assert "data-exfiltration" in out
@@ -1599,3 +1623,52 @@ def test_long_json_path_is_clipped_in_text_but_whole_in_json(tmp_path: Path) -> 
     _, payload, _ = _run([str(path), "--json"])
     reported = json.loads(payload)["tools"][0]["findings"][0]["path"]
     assert reported == "inputSchema" + ".properties.child" * 200 + ".description"
+
+
+def test_a_stale_entry_from_deep_metadata_is_clipped_too(tmp_path: Path) -> None:
+    # The stale notice prints the entry's label, which ends in the path it was
+    # written from. It shares stderr with the report and the same reader, so a
+    # deep entry must not print the thousands of characters render_text clips.
+    deep = tmp_path / "deep.json"
+    deep.write_text(_nested_manifest(200), encoding="utf-8")
+    baseline = tmp_path / "b.json"
+    assert _run([str(deep), "--write-baseline", str(baseline)])[0] == 0
+
+    fixed = _write(tmp_path, _FIXED)
+    code, _, err = _run([fixed, "--baseline", str(baseline)])
+    assert code == 0
+    entry = next(ln for ln in err.splitlines() if "data-exfiltration" in ln)
+    assert "..." in entry
+    assert len(entry) < 200
+    assert entry.rstrip().endswith(".description")
+
+    # The file itself keeps the path whole: it is the entry's identity.
+    stored = json.loads(baseline.read_text(encoding="utf-8"))["findings"][0]["path"]
+    assert stored == "inputSchema" + ".properties.child" * 200 + ".description"
+
+
+@pytest.mark.parametrize("levels_per_unit", [1, 2])
+@pytest.mark.parametrize("ceiling", [994, 1500, 3000, 6003, 9997, 100_000])
+def test_deep_fixture_depth_never_exceeds_the_decoder(
+    ceiling: int, levels_per_unit: int
+) -> None:
+    # Regression: the probe counts one json level per unit while the manifest
+    # fixture emits two, so spending the ceiling in units built a file the
+    # decoder refuses. That only stayed hidden while the ceiling was ten times
+    # the recursion limit, as on 3.12; anywhere between the two the deep tests
+    # went red instead of skipping. Pure arithmetic here, so it holds on every
+    # interpreter rather than only on the one that runs it.
+    units = _deep_units(ceiling, 1000, levels_per_unit)
+    if units is None:
+        return  # no window on that pairing, and the caller skips
+    levels = units * levels_per_unit
+    assert levels + _FIXTURE_WRAPPER_LEVELS <= ceiling  # the decoder still reads it
+    assert levels > 1000  # and a recursive walk still would not
+
+
+def test_the_deep_fixtures_parse_at_the_depth_the_probe_chose() -> None:
+    # Ties that arithmetic to the real shapes: whatever this interpreter's
+    # ceiling is, both fixtures decode at the depth they are handed.
+    json.loads(_nested_manifest(_readable_but_deep(2)))
+    chain = _readable_but_deep()
+    json.loads('{"result": ' * chain + "1" + "}" * chain)

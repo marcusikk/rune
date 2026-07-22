@@ -42,10 +42,10 @@ def _scanned_clause(results: list[ToolResult]) -> str:
 
 # A JSON path only reads as a location while it fits on a line or two. Metadata
 # nested hundreds of levels deep produces one thousands of characters long, and
-# printed whole it buries the finding it is labelling. The text report keeps both
-# ends, so the field name at the tail (the part that says what was poisoned) is
-# still there. Only this report clips: --json, SARIF and the baseline carry the
-# full path, which is what identifies a finding across runs.
+# printed whole it buries the finding it is labelling. Every line rune prints for
+# a human keeps both ends, so the field name at the tail (the part that says what
+# was poisoned) is still there. Only those lines clip: --json, SARIF and the
+# baseline carry the full path, which is what identifies a finding across runs.
 _PATH_LIMIT = 120
 _PATH_HEAD = 60
 _PATH_TAIL = _PATH_LIMIT - _PATH_HEAD - len("...")
@@ -103,7 +103,11 @@ def render_stale_notice(stale: Sequence[BaselineEntry]) -> str:
     lines = [
         f"rune: {len(stale)} baseline entry(s) matched nothing in this scan:"
     ]
-    lines.extend(f"  {entry.label}" for entry in stale)
+    # An entry's label ends in the path it was written from, so an entry taken
+    # from deep metadata carries the same thousands-of-characters problem the
+    # report body clips. Same channel, same reader, same treatment; the baseline
+    # file keeps the path whole.
+    lines.extend(f"  {_short_path(entry.label)}" for entry in stale)
     lines.append(
         "rune: prune them by re-running with --write-baseline, or ignore this if "
         "this scan covered less than the baseline was written from"

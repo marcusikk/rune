@@ -51,16 +51,28 @@ def _excerpt(text: str, offset: int, length: int) -> str:
 
 
 def _walk_strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
-    """Yield (json_path, string) for every string leaf under value."""
-    if isinstance(value, str):
-        yield (path, value)
-    elif isinstance(value, dict):
-        for key, sub in value.items():
-            child = f"{path}.{key}" if path else str(key)
-            yield from _walk_strings(sub, child)
-    elif isinstance(value, list):
-        for i, sub in enumerate(value):
-            yield from _walk_strings(sub, f"{path}[{i}]")
+    """Yield (json_path, string) for every string leaf under value, depth first.
+
+    Walked on an explicit stack rather than by recursion. The metadata comes
+    from the server under audit, and JSON that nests deeper than the
+    interpreter will recurse is trivial to write: a recursive walk over it dies
+    with a traceback part way through the scan, which is the one outcome a gate
+    must never have. The parser accepts nesting several times deeper than
+    Python will recurse, so that gap was reachable with a manifest rune could
+    read. Children are pushed in reverse so they pop in document order.
+    """
+    stack: list[tuple[Any, str]] = [(value, path)]
+    while stack:
+        node, node_path = stack.pop()
+        if isinstance(node, str):
+            yield (node_path, node)
+        elif isinstance(node, dict):
+            for key, sub in reversed(node.items()):
+                child = f"{node_path}.{key}" if node_path else str(key)
+                stack.append((sub, child))
+        elif isinstance(node, list):
+            for i in range(len(node) - 1, -1, -1):
+                stack.append((node[i], f"{node_path}[{i}]"))
 
 
 # The order kinds are reported in: tools, then prompts, resources, and last the

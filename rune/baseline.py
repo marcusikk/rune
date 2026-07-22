@@ -149,6 +149,10 @@ def load_baseline(path: str) -> list[BaselineEntry]:
             data = json.load(fh)
         except json.JSONDecodeError as exc:
             raise BaselineError(f"not valid JSON: {exc}") from exc
+        except RecursionError as exc:
+            # The decoder refuses very deep nesting by raising this instead of a
+            # decode error. Unhandled it would be a traceback out of a file read.
+            raise BaselineError("JSON nests deeper than the parser will read") from exc
 
     if not isinstance(data, dict):
         raise BaselineError("baseline must be a JSON object")

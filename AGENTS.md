@@ -31,6 +31,11 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
 - No `subprocess` and no `assert` in the package; tests drive the CLI in-process
   via `StringIO`, so `bandit -r .` reports no issues.
 - Detection regexes are bounded to avoid catastrophic backtracking.
+- Server text reaches a line of rune's prose only through `render_visible`:
+  entity names and JSON paths as much as excerpts. Data surfaces (`--json`,
+  SARIF's structured fields, the baseline and pin files) keep the exact text
+  instead, so a consumer sees what the server sent. See
+  `tests/test_report_safety.py`.
 - The `data-exfiltration` rule keys on the secret being the grammatical object
   of an outbound verb, never on word order. See `tests/test_precision.py`.
 

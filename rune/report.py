@@ -42,15 +42,27 @@ def _scanned_clause(results: list[ToolResult]) -> str:
 
 
 def render_text(results: list[ToolResult], *, color: bool = False, baselined: int = 0) -> str:
+    """Render the human report.
+
+    The entity name and the JSON path are the server's text, not rune's: the
+    name is whatever the manifest called the tool, and the path is built from
+    the manifest's own object keys. Both are escaped for the same reason the
+    excerpt always has been. A name holding a newline would otherwise write
+    whole lines of this report itself, and a report that reads as rune's
+    verdict is exactly what an attacker wants to author. Escaping is the
+    identity on every name and path that does not contain one, so an ordinary
+    report is unchanged.
+    """
     lines: list[str] = []
     total_findings = sum(len(r.findings) for r in results)
 
     for r in results:
-        header = f"{r.kind} {r.name}  risk {r.score}/100  [{r.band}]"
+        header = f"{r.kind} {render_visible(r.name)}  risk {r.score}/100  [{r.band}]"
         lines.append(_paint(r.band, header, color))
         for f in r.findings:
             tag = f"[{f.severity.label.upper()}]"
-            location = f"{f.path} (offset {f.offset})" if f.path else f"offset {f.offset}"
+            path = render_visible(f.path)
+            location = f"{path} (offset {f.offset})" if path else f"offset {f.offset}"
             lines.append(f"  {tag} {f.rule}  {location}")
             lines.append(f"      {f.message}")
             lines.append(f"      > {f.excerpt}")
@@ -79,11 +91,15 @@ def render_stale_notice(stale: Sequence[BaselineEntry]) -> str:
     because the finding was fixed, and it can match nothing because this scan
     covered less than the one the baseline was written from. rune cannot tell
     those apart, so it reports the fact and leaves the judgement to the reader.
+
+    A label is the entity name a past scan recorded, so it is still the server's
+    text however long it has sat in the repo, and it is escaped like the drift
+    notice's.
     """
     lines = [
         f"rune: {len(stale)} baseline entry(s) matched nothing in this scan:"
     ]
-    lines.extend(f"  {entry.label}" for entry in stale)
+    lines.extend(f"  {render_visible(entry.label)}" for entry in stale)
     lines.append(
         "rune: prune them by re-running with --write-baseline, or ignore this if "
         "this scan covered less than the baseline was written from"
@@ -298,8 +314,15 @@ def _sarif_result(r: ToolResult, f: Finding, uri: str | None) -> dict[str, Any]:
         # surrounding context on each side, so using it here would present
         # benign neighbouring prose to a triager as the flagged text. Escaped,
         # because an invisible-characters match is by definition unprintable.
+        # The name is escaped for the same reason: this is a sentence a triager
+        # reads, so server text in it is quoted, never spelled out. The
+        # structured fields below keep the exact name, because those are the
+        # finding's data and a tool matching on them must see what was sent.
         "message": {
-            "text": f"{r.kind} {r.name}: {f.message}. Flagged text: {render_visible(f.match)}"
+            "text": (
+                f"{r.kind} {render_visible(r.name)}: {f.message}. "
+                f"Flagged text: {render_visible(f.match)}"
+            )
         },
         "locations": [location],
         # Baseline and SARIF agree on identity, so a result carries the same id

@@ -18,6 +18,11 @@ def render_visible(text: str) -> str:
     Shared with the reporters: any surface that prints a snippet of scanned
     metadata has to escape it, or the invisible characters rune exists to find
     pass straight through the report unseen.
+
+    Two properties every caller relies on. The result carries no character that
+    can end or forge a line of rune's own output, and it carries no character a
+    UTF-8 stream refuses to encode. Together they are what lets a reporter
+    interpolate server-controlled text into a line of prose at all.
     """
     out: list[str] = []
     for ch in text:
@@ -26,6 +31,22 @@ def render_visible(text: str) -> str:
             out.append(" ")
         elif ch == "\n":
             out.append("\\n")
+        elif cp in (0x2028, 0x2029):
+            # Unicode's own line and paragraph separators. A terminal ignores
+            # them, but str.splitlines() and plenty of viewers break a line on
+            # one, so leaving them raw would hand a name a second way to write
+            # a line of this report. No rule flags them either, since they are
+            # legitimate text elsewhere.
+            out.append(f"<U+{cp:04X}>")
+        elif 0xD800 <= cp <= 0xDFFF:
+            # Not a hidden character but an unencodable one. JSON may escape an
+            # unpaired surrogate, and Python's parser hands it back as a code
+            # point no UTF-8 stream will take, so printing it raw raises on a
+            # scan that had otherwise succeeded. The server picks whether that
+            # happens, which makes it a way to silence a report rather than a
+            # quirk. Escaped, it prints and stays distinct from every other
+            # code point.
+            out.append(f"<U+{cp:04X}>")
         elif cp < 0x20 or cp == 0x7F or 0x80 <= cp <= 0x9F or cp in (
             0x200B,
             0x200C,

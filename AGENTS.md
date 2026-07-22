@@ -17,6 +17,9 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
 - `rune/scan.py` - walks an entity dict (tool, prompt, or resource), tags each
   hit with its JSON path, and rolls findings into a 0-100 score and a band.
   `scan_targets` groups the kinds; each result carries its `kind`.
+- `rune/pin.py` - digests every string `scan.walk_strings` yields and diffs a
+  scan against a recorded pin. Detection by change, not by pattern, so it is the
+  one part of rune that is not a rule and emits no finding.
 - `rune/report.py` - text and JSON rendering.
 - `rune/client.py` - live stdio scan via the MCP SDK (lazy import).
 - `rune/cli.py` - `main(argv, out, err)`, driven in-process by the tests.

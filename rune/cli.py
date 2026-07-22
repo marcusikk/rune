@@ -8,11 +8,18 @@ import os
 from typing import TYPE_CHECKING, Any, TextIO
 
 from .models import Severity
-from .report import render_json, render_sarif, render_stale_notice, render_text
+from .report import (
+    render_drift_notice,
+    render_json,
+    render_sarif,
+    render_stale_notice,
+    render_text,
+)
 from .scan import scan_targets
 
 if TYPE_CHECKING:
     from .baseline import BaselineEntry
+    from .pin import Drift
 
 _VERSION = "0.1.0"
 
@@ -84,6 +91,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--fail-on-stale-baseline",
         action="store_true",
         help="also exit 1 when a --baseline entry matched nothing in this scan",
+    )
+    parser.add_argument(
+        "--pin",
+        metavar="FILE",
+        help="exit 1 if the scanned metadata differs from the one recorded in "
+        "FILE, whether or not any rule fires on the new text",
+    )
+    parser.add_argument(
+        "--write-pin",
+        metavar="FILE",
+        help="record the current metadata to FILE as a pin and exit 0",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument(
@@ -531,8 +549,29 @@ def main(
         if warning:
             print(warning, file=err)
 
-    if args.baseline and args.write_baseline:
-        print("rune: use --baseline or --write-baseline, not both", file=err)
+    # A run that writes an artifact records the scan instead of judging it: it
+    # reports nothing and exits 0 by design. A judging flag passed alongside one
+    # is therefore a gate that is accepted and then never runs, and the exit code
+    # reports success for a check nobody made. Refused as a whole matrix rather
+    # than pair by pair, so a flag added to either side later cannot quietly
+    # open a cell.
+    judging = [
+        flag
+        for flag, given in (("--baseline", args.baseline), ("--pin", args.pin))
+        if given
+    ]
+    writing = [
+        flag
+        for flag, given in (
+            ("--write-baseline", args.write_baseline),
+            ("--write-pin", args.write_pin),
+        )
+        if given
+    ]
+    if judging and writing:
+        # One pair is enough to explain the refusal, so the message names the
+        # first of each rather than listing a combination nobody typed on purpose.
+        print(f"rune: use {judging[0]} or {writing[0]}, not both", file=err)
         return _EXIT_ERROR
 
     if args.fail_on_stale_baseline and not args.baseline:
@@ -579,6 +618,7 @@ def main(
 
     results = scan_targets(groups)
 
+    wrote_artifact = False
     if args.write_baseline:
         from .baseline import build_baseline
 
@@ -595,7 +635,45 @@ def main(
             f"rune: wrote baseline with {count} finding(s) to {args.write_baseline}",
             file=err,
         )
+        wrote_artifact = True
+
+    if args.write_pin:
+        from .pin import build_pin
+
+        pin_document = build_pin(groups)
+        try:
+            with open(args.write_pin, "w", encoding="utf-8") as fh:
+                json.dump(pin_document, fh, indent=2, ensure_ascii=True)
+                fh.write("\n")
+        except OSError as exc:
+            print(f"rune: cannot write pin: {exc}", file=err)
+            return _EXIT_ERROR
+        print(
+            f"rune: wrote pin for {len(pin_document['entities'])} entity(s) to "
+            f"{args.write_pin}",
+            file=err,
+        )
+        wrote_artifact = True
+
+    # Writing an artifact records the scan rather than judging it, so it reports
+    # nothing and exits clean. Both files can be written in one run: a first
+    # review commits the findings it accepted and the text it accepted them for.
+    if wrote_artifact:
         return _EXIT_CLEAN
+
+    drifts: list[Drift] = []
+    if args.pin:
+        from .pin import PinError, load_pin, pin_drift, pin_entities
+
+        try:
+            pinned = load_pin(args.pin)
+        except FileNotFoundError:
+            print(f"rune: no such pin: {args.pin}", file=err)
+            return _EXIT_ERROR
+        except (PinError, OSError) as exc:
+            print(f"rune: cannot read pin: {exc}", file=err)
+            return _EXIT_ERROR
+        drifts = pin_drift(pinned, pin_entities(groups))
 
     baselined = 0
     stale: list[BaselineEntry] = []
@@ -632,7 +710,7 @@ def main(
             source_uri = manifest if manifest and manifest != _STDIN_ARG else None
         print(render_sarif(results, uri=source_uri, version=_VERSION), file=out)
     elif args.json:
-        print(render_json(results, baselined=baselined, stale=stale), file=out)
+        print(render_json(results, baselined=baselined, stale=stale, drifts=drifts), file=out)
     else:
         print(render_text(results, color=_want_color(args, out), baselined=baselined), file=out)
 
@@ -641,10 +719,18 @@ def main(
     # lands inside piped --json or --sarif but is still seen in those modes.
     if stale:
         print(render_stale_notice(stale), file=err)
+    if drifts:
+        print(render_drift_notice(drifts), file=err)
 
     threshold = Severity.from_label(args.fail_on)
     hit = any(f.severity >= threshold for r in results for f in r.findings)
     if hit:
+        return _EXIT_FINDING
+    # Not gated behind a second flag the way a stale baseline entry is: --pin
+    # only ever means "fail if this is not the metadata I reviewed", so passing
+    # it is the opt-in. --fail-on does not apply either, since drift is a fact
+    # about the text and carries no severity of its own.
+    if drifts:
         return _EXIT_FINDING
     # Opt-in, and only ever able to turn a 0 into a 1: a stale approval is a
     # hygiene problem worth blocking on if a team chooses to, never a finding.

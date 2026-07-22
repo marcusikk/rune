@@ -50,17 +50,23 @@ def _excerpt(text: str, offset: int, length: int) -> str:
     return f"{prefix}{snippet}{suffix}"
 
 
-def _walk_strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
-    """Yield (json_path, string) for every string leaf under value."""
+def walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """Yield (json_path, string) for every string leaf under value.
+
+    This is the definition of the surface rune reads: every string here is a
+    string a model can be shown. Public because the pin records exactly this
+    set, and a pin built from a second, hand-written walk would drift from what
+    the scanner actually looks at.
+    """
     if isinstance(value, str):
         yield (path, value)
     elif isinstance(value, dict):
         for key, sub in value.items():
             child = f"{path}.{key}" if path else str(key)
-            yield from _walk_strings(sub, child)
+            yield from walk_strings(sub, child)
     elif isinstance(value, list):
         for i, sub in enumerate(value):
-            yield from _walk_strings(sub, f"{path}[{i}]")
+            yield from walk_strings(sub, f"{path}[{i}]")
 
 
 # The order kinds are reported in: tools, then prompts, resources, and last the
@@ -68,7 +74,9 @@ def _walk_strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
 KINDS = ("tool", "prompt", "resource", "server")
 
 
-def _entity_label(entity: dict[str, Any], kind: str, index: int) -> str:
+def entity_label(entity: dict[str, Any], kind: str, index: int) -> str:
+    """The name this entity is reported under. Shared with the pin, which keys
+    its entries on the same label the report prints."""
     # The server's name and title live nested under serverInfo, not at the top
     # level, so read the label from there rather than duplicating it as a
     # top-level string (which would then be scanned twice).
@@ -91,8 +99,8 @@ def _entity_label(entity: dict[str, Any], kind: str, index: int) -> str:
 
 def scan_entity(entity: dict[str, Any], kind: str = "tool", index: int = 0) -> ToolResult:
     """Scan one tool, prompt or resource definition into a result."""
-    result = ToolResult(name=_entity_label(entity, kind, index), kind=kind)
-    for path, text in _walk_strings(entity, ""):
+    result = ToolResult(name=entity_label(entity, kind, index), kind=kind)
+    for path, text in walk_strings(entity):
         for rule, severity, offset, length, message in scan_text(text):
             result.findings.append(
                 Finding(

@@ -106,6 +106,21 @@ If a reply carries listings both at the top level and under `result`, rune scans
 both. A spec-compliant client reads `result`, so a clean top-level listing is
 never allowed to hide a poisoned one beside it under `result`.
 
+Repeat `--manifest` to scan several captured listings in one run:
+
+```
+rune --manifest github.json --manifest jira.json --manifest notes.json
+```
+
+Each file is scanned on its own, and the report names which one a finding came
+from. The reason to scan them together rather than one at a time is
+`name-collision`: a server that claims the name of a tool you already trust is
+shadowing it, and that is only visible with both listings in hand. `--config`
+finds this across a live setup, but a CI job that cannot open every server over
+the network can commit each server's captured `tools/list` reply and get the same
+cross-server check offline. A single `--manifest` is unchanged, and `-` reads one
+stream, so it cannot be one of several files.
+
 The same file can carry the server's own metadata from an `initialize` response.
 rune scans two fields there, and only those two: `instructions` (the string the
 spec says a client may add to the system prompt) and `serverInfo` (the display
@@ -890,11 +905,13 @@ rune is a signal for human review, not a proof of safety.
   files keep the server's exact text instead, since a program reading those needs
   what was actually sent.
 - `name-collision` compares the entities one run scanned, so it sees a shadowed
-  tool name only across servers rune actually opened: narrowed away with
-  `--server`, disabled in the config, or failed to start means not compared. It
-  covers tools and prompts, the kinds a client routes by name, matches names
-  exactly, and needs a declared `name` on both ends. It reports the ambiguity and
-  not a culprit, since nothing in two listings says which one had the name first.
+  tool name only across the listings that run covered: servers rune opened over a
+  transport or `--config` (narrowed away with `--server`, disabled in the config,
+  or failed to start means not compared), or the captured manifests passed with
+  repeated `--manifest`. It covers tools and prompts, the kinds a client routes by
+  name, matches names exactly, and needs a declared `name` on both ends. It
+  reports the ambiguity and not a culprit, since nothing in two listings says
+  which one had the name first.
 - It is pattern-based, with no model in the loop. It will not resolve arbitrary
   pronoun references or paraphrase, so a determined attacker can phrase around
   it. Treat a clean result as "no known trick found", not "safe". `--pin` is the

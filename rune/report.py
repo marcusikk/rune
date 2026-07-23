@@ -45,7 +45,7 @@ def _scanned_clause(results: list[ToolResult]) -> str:
     return ", ".join(parts) + " scanned"
 
 
-def _entity_lines(r: ToolResult, color: bool) -> list[str]:
+def _entity_lines(r: ToolResult, color: bool, *, show_source: bool = False) -> list[str]:
     """The block of report lines for one scanned entity.
 
     The entity name and the JSON path are the server's text, not rune's: the
@@ -56,8 +56,14 @@ def _entity_lines(r: ToolResult, color: bool) -> list[str]:
     verdict is exactly what an attacker wants to author. Escaping is the
     identity on every name and path that does not contain one, so an ordinary
     report is unchanged.
+
+    ``show_source`` prefixes the source when several listings share one flat
+    report, so a reader can tell which of them a finding came from. A --config
+    scan leaves it off because its section headings already name each server;
+    a single-source scan has no source to show.
     """
-    header = f"{r.kind} {render_visible(r.name)}  risk {r.score}/100  [{r.band}]"
+    where = f"{render_visible(r.source)} / " if show_source and r.source is not None else ""
+    header = f"{where}{r.kind} {render_visible(r.name)}  risk {r.score}/100  [{r.band}]"
     lines = [_paint(r.band, header, color)]
     for f in r.findings:
         tag = f"[{f.severity.label.upper()}]"
@@ -102,10 +108,15 @@ def _roll_call(sources: Sequence[SourceStatus], config: str) -> str:
 
 
 def render_text(results: list[ToolResult], *, color: bool = False, baselined: int = 0) -> str:
-    """Render the human report for a scan of one server."""
+    """Render the human report for a scan of one server, or of several captured
+    listings that each name their source."""
+    # Several captured manifests are reported flat, not in config-style sections,
+    # so a finding names its source inline. A single scan has no source set and
+    # reads exactly as it always has.
+    show_source = any(r.source is not None for r in results)
     lines: list[str] = []
     for r in results:
-        lines.extend(_entity_lines(r, color))
+        lines.extend(_entity_lines(r, color, show_source=show_source))
     lines.append(_summary(results, baselined))
     return "\n".join(lines)
 

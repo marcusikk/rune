@@ -78,8 +78,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manifest",
         dest="manifest_flag",
+        action="append",
         metavar="FILE",
-        help="same as the positional manifest argument",
+        help="same as the positional manifest argument; repeatable, so several "
+        "captured listings scan together and name-collision spans them",
     )
     parser.add_argument(
         "--stdio",
@@ -684,13 +686,18 @@ def main(
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    manifest = args.manifest_flag or args.manifest
+    # A positional manifest and any number of --manifest flags name the same kind
+    # of input, so they fold into one list. One file is the ordinary scan; several
+    # are captured listings from different servers, checked together so a shadowed
+    # tool name is visible across them the way --config makes it visible across a
+    # live setup.
+    manifests = ([args.manifest] if args.manifest else []) + list(args.manifest_flag or [])
     # --http and --sse are both remote URL transports and share the same URL
     # validation, header, cleartext-warning and SARIF-URI handling.
     remote_url = args.http or args.sse
     remote_opt = "--http" if args.http else "--sse"
     given = [
-        bool(manifest), bool(args.stdio), bool(args.http), bool(args.sse), bool(args.config)
+        bool(manifests), bool(args.stdio), bool(args.http), bool(args.sse), bool(args.config)
     ]
     if sum(given) != 1:
         print(
@@ -699,6 +706,18 @@ def main(
             file=err,
         )
         return _EXIT_ERROR
+
+    if len(manifests) > 1:
+        # stdin is a single stream, so it cannot be one of several files, and the
+        # same file twice would print as two servers colliding with themselves. A
+        # source has to name exactly one listing for the report and the collision
+        # message to mean anything.
+        if _STDIN_ARG in manifests:
+            print("rune: stdin '-' cannot be combined with other manifests", file=err)
+            return _EXIT_ERROR
+        if len(set(manifests)) != len(manifests):
+            print("rune: the same manifest was given more than once", file=err)
+            return _EXIT_ERROR
 
     if args.header and not remote_url:
         # --header belongs to a URL given on the command line. A config carries
@@ -818,6 +837,25 @@ def main(
             )
             return _EXIT_ERROR
         scanned: list[str] | None = [name for name, _ in listings]
+    elif len(manifests) > 1:
+        # Several captured listings, each named after the file it came from, so
+        # every result knows which server it describes and name-collision can span
+        # them. This is the offline shape of a --config run: the same per-source
+        # scan, minus the transports rune would have opened itself.
+        results = []
+        listings = []
+        for path in manifests:
+            try:
+                groups = _load_manifest(path, inp)
+            except FileNotFoundError:
+                print(f"rune: no such file: {path}", file=err)
+                return _EXIT_ERROR
+            except (json.JSONDecodeError, ValueError, OSError) as exc:
+                print(f"rune: cannot read manifest {path}: {exc}", file=err)
+                return _EXIT_ERROR
+            results.extend(scan_targets(groups, source=path))
+            listings.append((path, groups))
+        scanned = [path for path, _ in listings]
     else:
         # No config, so exactly one server and no name for it. The pin records no
         # server name in that case and is compared without one, which is what
@@ -849,9 +887,9 @@ def main(
                     print(f"rune: live scan failed: {exc}", file=err)
                     return _EXIT_ERROR
             else:
-                groups = _load_manifest(manifest, inp)
+                groups = _load_manifest(manifests[0], inp)
         except FileNotFoundError:
-            print(f"rune: no such file: {manifest}", file=err)
+            print(f"rune: no such file: {manifests[0]}", file=err)
             return _EXIT_ERROR
         except (json.JSONDecodeError, ValueError, OSError) as exc:
             print(f"rune: cannot read manifest: {exc}", file=err)
@@ -979,7 +1017,10 @@ def main(
             # is what a platform should anchor the alerts to.
             source_uri = args.config
         else:
-            source_uri = manifest if manifest and manifest != _STDIN_ARG else None
+            # One manifest anchors every alert to that file. Several have no one
+            # file to point at, so each result carries its own source instead.
+            single = manifests[0] if len(manifests) == 1 else None
+            source_uri = single if single and single != _STDIN_ARG else None
         print(
             render_sarif(results, uri=source_uri, version=_VERSION, sources=statuses),
             file=out,

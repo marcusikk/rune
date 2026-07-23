@@ -225,6 +225,26 @@ def render_drift_notice(drifts: Sequence[Drift]) -> str:
     return "\n".join(lines)
 
 
+def render_unchecked_notice(names: Sequence[str]) -> str:
+    """Name the pinned servers this run did not scan, so a partial gate says so.
+
+    A pin over a whole config is a gate, and a gate that silently checks four of
+    six servers is the failure the roll call exists to prevent. rune cannot tell
+    why a server was left out, whether it was narrowed away with --server,
+    switched off in the config, or taken out of the file since the pin was
+    written, so it reports the fact and leaves the reading to whoever ran it.
+
+    On stderr in every output mode, for the reason the drift notice is.
+    """
+    lines = [f"rune: the pin also covers {len(names)} server(s) this run did not scan:"]
+    lines.extend(f"  {render_visible(name)}" for name in names)
+    lines.append(
+        "rune: their pinned metadata was not checked; scan them to check it, or "
+        "re-run with --write-pin to drop them"
+    )
+    return "\n".join(lines)
+
+
 def _entity_json(r: ToolResult) -> dict[str, Any]:
     entity: dict[str, Any] = {
         "name": r.name,
@@ -255,6 +275,7 @@ def to_json(
     baselined: int = 0,
     stale: Sequence[BaselineEntry] = (),
     drifts: Sequence[Drift] = (),
+    unchecked: Sequence[str] = (),
     sources: Sequence[SourceStatus] = (),
 ) -> dict[str, Any]:
     # Grouped by kind so the "tools" array keeps its existing shape and prompts
@@ -275,6 +296,11 @@ def to_json(
         # The pin differences in machine-readable form, so a pipeline can tell a
         # changed description from a tool that was added without parsing stderr.
         "pinDrift": [drift.as_dict() for drift in drifts],
+        # The servers the pin covers that this run did not scan, so a consumer
+        # can see that a clean pinDrift was a partial check. Not derivable from
+        # "sources" below: a server dropped from the config since the pin was
+        # written appears here and nowhere else.
+        "pinUnchecked": list(unchecked),
         # Every server a --config run was asked to cover, scanned or not, in
         # config order. A consumer that only counted the entities below would
         # read a server that failed to start as a server with nothing to report.
@@ -290,6 +316,7 @@ def to_json(
             "baselined": baselined,
             "staleBaseline": len(stale),
             "pinDrift": len(drifts),
+            "pinUnchecked": len(unchecked),
             "sources": len(sources),
             "sourcesScanned": sum(1 for status in sources if status.ok),
         },
@@ -302,10 +329,18 @@ def render_json(
     baselined: int = 0,
     stale: Sequence[BaselineEntry] = (),
     drifts: Sequence[Drift] = (),
+    unchecked: Sequence[str] = (),
     sources: Sequence[SourceStatus] = (),
 ) -> str:
     return json.dumps(
-        to_json(results, baselined=baselined, stale=stale, drifts=drifts, sources=sources),
+        to_json(
+            results,
+            baselined=baselined,
+            stale=stale,
+            drifts=drifts,
+            unchecked=unchecked,
+            sources=sources,
+        ),
         indent=2,
         ensure_ascii=True,
     )

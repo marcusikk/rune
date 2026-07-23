@@ -261,14 +261,22 @@ clear the alerts it raised before, which is the right answer for a server that
 was scanned and came back clean and the wrong one for a server that has quietly
 stopped starting.
 
-`--baseline` and `--pin` both describe one server's metadata, so they need one
-server: use `--server NAME` to say which, and rune refuses rather than writing a
-file that cannot say which server it is about.
+`--baseline` and `--pin` cover every server the run scanned, so one file gates
+the whole setup and adding a server to the config does not mean remembering to
+add a seventh file beside it:
 
 ```
-rune --config .mcp.json --server notes --write-pin notes.pin.json
-rune --config .mcp.json --server notes --pin notes.pin.json   # exit 1 if it changed
+rune --config .mcp.json --write-pin mcp.pin.json   # review, then commit
+rune --config .mcp.json --pin mcp.pin.json         # exit 1 if any server changed
 ```
+
+Each entry records the config's name for the server it came from, so two servers
+exposing an identically named tool are held apart and an approval given to one
+never covers the other. `--server NAME` still narrows the run, and a server it
+leaves out is reported as unchecked rather than compared: scanning one of six
+servers does not report the other five as deleted, and it says so on stderr
+instead of passing quietly. [Pin](#pin-fail-when-the-server-changes-what-it-says)
+has the details.
 
 Machine-readable output and CI:
 
@@ -317,6 +325,10 @@ Baseline files written before rune scanned prompts and resources keep working
 unchanged: a tool finding's identity is byte-for-byte what it always was, so
 there is nothing to regenerate.
 
+A baseline written from a `--config` run covers every server it scanned, and each
+entry records the server it was approved on, so one file suppresses across the
+whole setup without one server's approval leaking onto its namesake in another.
+
 #### Stale entries
 
 A baseline entry is a standing approval that lives in your repo. When the
@@ -346,6 +358,12 @@ the same surface each time, which is the normal case in CI:
 ```
 rune --manifest tools.json --baseline rune-baseline.json --fail-on-stale-baseline
 ```
+
+On a `--config` run, an entry approved on a server the run did not scan is not
+reported: it matched nothing because rune did not look at that server, which says
+nothing about whether the finding is still there. Narrowing to one server with
+`--server` therefore reports on that server's approvals and leaves the rest of
+the file alone.
 
 Prune by re-running `--write-baseline` over the current scan and committing the
 diff. `--json` carries the same entries under `staleBaseline`, with a count in
@@ -415,6 +433,58 @@ is compared against. Pin from the same command you gate with. A pin written from
 a full `--http` scan and compared against a piped `tools/list` reply reports
 every prompt and the server metadata as removed, correctly, because that scan
 could not see them.
+
+#### One pin for the whole config
+
+A rug pull is not something you catch on the one server you remembered to pin by
+hand. Pinning a `--config` run records every server it scanned in one file:
+
+```
+rune --config .mcp.json --write-pin mcp.pin.json   # review, then commit
+rune --config .mcp.json --pin mcp.pin.json         # exit 1 if any of them changed
+```
+
+```
+rune: 1 pinned entity(s) no longer match the pin:
+  notes: tool sync_notes  changed: description
+rune: read the change before accepting it; re-run with --write-pin to pin the metadata as it is now
+```
+
+The config's name for the server is part of an entry's identity, so two servers
+that each expose a `search` tool are pinned as two things, and the text approved
+for one is not an approval of the other's.
+
+Comparison covers the servers the run actually scanned, and nothing else. A run
+narrowed with `--server`, a server the config has switched off, and a server
+taken out of the config since the pin was written all mean rune did not look, and
+"I did not look" is not "it is gone". Those servers are named on stderr instead,
+so a partial check is never read as a whole one:
+
+```
+rune: the pin also covers 2 server(s) this run did not scan:
+  billing
+  docs
+rune: their pinned metadata was not checked; scan them to check it, or re-run with --write-pin to drop them
+```
+
+`--json` carries the same names under `pinUnchecked`, with a count in
+`summary.pinUnchecked`, and each `pinDrift` entry gains the `source` it came
+from. A server that failed to start is one of the unchecked: the servers beside
+it are still judged against the pin, and the run exits `2` for the failure the
+way any incomplete audit does.
+
+Writing is stricter than judging. `--write-pin` refuses when a server it was
+asked to cover would not answer, because a file that records four of six servers
+as the whole setup makes the other two look newly added the next time anybody
+looks, and nobody can then say whether they were ever reviewed. Fix the server or
+narrow the run with `--server`. A disabled server is not a failure, so it is
+simply left out, and the write says which servers it left out.
+
+Pins written before rune could read a config name no server. One of those still
+gates the single server it was written for, including a single server picked out
+of a config with `--server`, so there is nothing to regenerate. Judged against a
+config with several servers it is refused rather than guessed at: nothing in the
+file says which of them it describes.
 
 ## What it looks for
 

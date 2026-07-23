@@ -180,6 +180,53 @@ def test_a_pin_gates_one_server_picked_out_of_a_config(tmp_path: Path) -> None:
     assert "no longer match the pin" in err
 
 
+def test_one_pin_gates_every_server_in_the_config(tmp_path: Path) -> None:
+    # The rug pull at the scale people actually run: several servers wired into
+    # one client, one of them serving different words a month later, caught by
+    # one file and one command over real handshakes.
+    pin = tmp_path / "mcp.pin.json"
+    # weather and forecast run the same binary, so the two entries list byte for
+    # byte the same tools. They are still two servers, and the pin has to hold
+    # them as two, not fold them into one.
+    honest = _config(
+        tmp_path,
+        {
+            "weather": _entry("clean_server.py"),
+            "forecast": _entry("clean_server.py"),
+            "notes": _entry("rug_pull_server.py"),
+        },
+        name="honest.json",
+    )
+    code, _, err = _run(["--config", honest, "--write-pin", str(pin)])
+    assert code == 0
+    assert "wrote pin for " in err
+    recorded = json.loads(pin.read_text(encoding="utf-8"))["entities"]
+    assert {e["source"] for e in recorded} == {"weather", "forecast", "notes"}
+
+    # Control: the same three servers again is not drift, so the difference below
+    # can only have come from the description that changed.
+    assert _run(["--config", honest, "--pin", str(pin)])[0] == 0
+
+    pulled = _config(
+        tmp_path,
+        {
+            "weather": _entry("clean_server.py"),
+            "forecast": _entry("clean_server.py"),
+            "notes": _entry(
+                "rug_pull_server.py",
+                args=[str(_FIXTURES / "rug_pull_server.py"), "--pulled"],
+            ),
+        },
+        name="pulled.json",
+    )
+    code, _, err = _run(["--config", pulled, "--pin", str(pin)])
+    assert code == 1
+    # The swapped description fires no rule, so the pin is the only thing that
+    # can see it, and it names which of the three servers moved.
+    assert "rune: 1 pinned entity(s) no longer match the pin:" in err
+    assert "notes: tool sync_notes  changed: description" in err
+
+
 def test_a_baseline_written_from_a_config_suppresses_that_server(tmp_path: Path) -> None:
     baseline = tmp_path / "notes.baseline.json"
     config = _config(tmp_path, {"notes": _entry("poisoned_server.py")})

@@ -47,6 +47,13 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
 - A finding's identity is `(source, kind, entity name, rule, JSON path, matched
   text)`. `source` is set only on a `--config` scan and left out of the digest
   otherwise, so every baseline written before it keeps working.
+- A pinned entity's identity is `(source, kind, entity name)` plus the JSON path
+  of each string. `source` is written only on a `--config` scan, and a pin that
+  names no server is adopted by the single server a run scanned, so every pin
+  written before it keeps working and `_FORMAT_VERSION` stays 1.
+- `--pin` and `--baseline` compare only the servers a run actually scanned. A
+  server left out is named as unchecked, never reported as removed or stale:
+  "rune did not look" is not "it is gone".
 
 ## Checks
 

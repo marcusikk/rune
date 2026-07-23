@@ -18,12 +18,16 @@ from .report import (
     render_source_notice,
     render_stale_notice,
     render_text,
+    render_unchecked_notice,
 )
 from .scan import render_visible, scan_targets
 
 if TYPE_CHECKING:
     from .baseline import BaselineEntry
     from .pin import Drift
+
+# One server's metadata as the client returns it: a listing per kind.
+_Groups = dict[str, list[dict[str, Any]]]
 
 _VERSION = "0.1.0"
 
@@ -574,7 +578,7 @@ def _fetch_spec(spec: ServerSpec, err: TextIO) -> dict[str, list[dict[str, Any]]
 
 def _scan_specs(
     specs: list[ServerSpec], err: TextIO
-) -> tuple[list[ToolResult], list[SourceStatus], dict[str, list[dict[str, Any]]] | None]:
+) -> tuple[list[ToolResult], list[SourceStatus], list[tuple[str | None, _Groups]]]:
     """Scan each config entry in turn, collecting results and a per-server status.
 
     One server's failure is that server's failure. A server that will not start
@@ -582,16 +586,16 @@ def _scan_specs(
     audit on the first broken entry, means the entry nobody has fixed keeps every
     other server in the config from ever being looked at.
 
-    The third return value is the raw listing of the single scanned server, which
-    is what --pin and --write-pin need. It is None whenever the run did not
-    produce exactly one server's worth of metadata, and the caller has already
-    refused those flags in that case.
+    The third return value pairs each scanned server's name with the raw listing
+    it returned, which is what --pin and --write-pin digest. A server that was
+    not scanned contributes no pair, so a pin never records metadata rune did not
+    read.
     """
     from .client import LiveScanError
 
     results: list[ToolResult] = []
     statuses: list[SourceStatus] = []
-    only_groups: dict[str, list[dict[str, Any]]] | None = None
+    listings: list[tuple[str | None, _Groups]] = []
 
     for spec in specs:
         if spec.error is not None:
@@ -613,11 +617,9 @@ def _scan_specs(
             continue
         statuses.append(SourceStatus(spec.name, spec.label, "scanned"))
         results.extend(scan_targets(groups, source=spec.name))
-        only_groups = groups
+        listings.append((spec.name, groups))
 
-    if sum(1 for s in statuses if s.ok) != 1:
-        only_groups = None
-    return results, statuses, only_groups
+    return results, statuses, listings
 
 
 def _want_color(args: argparse.Namespace, out: TextIO) -> bool:
@@ -714,6 +716,9 @@ def main(
         return _EXIT_ERROR
 
     statuses: list[SourceStatus] = []
+    # Each server this run read, paired with its raw metadata: one entry named
+    # after the config that declared it, or a single unnamed one otherwise.
+    listings: list[tuple[str | None, _Groups]] = []
     if args.config:
         try:
             specs = load_config(args.config)
@@ -733,35 +738,39 @@ def main(
             # printing "0 tool(s) scanned" and exiting 0 on an empty config.
             print(f"rune: {args.config} declares no MCP servers", file=err)
             return _EXIT_ERROR
-        # A baseline and a pin are both statements about one server's metadata,
-        # keyed on the entity names inside it. Across several servers there is no
-        # one thing for either file to describe, so the run is narrowed with
-        # --server rather than the files quietly being made ambiguous.
-        if len(specs) != 1 and (judging or writing):
-            print(
-                f"rune: {(judging + writing)[0]} covers one server; add --server "
-                "NAME to pick which one out of the config",
-                file=err,
-            )
-            return _EXIT_ERROR
-        results, statuses, groups = _scan_specs(specs, err)
-        if groups is None:
-            # Nothing to pin: either no server was scanned or more than one was,
-            # and the latter has already been refused above.
-            groups = {}
-        if (judging or writing) and not all(s.ok for s in statuses):
+        results, statuses, listings = _scan_specs(specs, err)
+        if (judging or writing) and not listings:
             # Both files describe metadata rune actually read. Writing one from a
-            # server that never answered would record an absence as a fact, and
+            # scan that opened nothing would record an absence as a fact, and
             # judging against one would report every pinned entity as removed and
             # every approved finding as stale. Neither is a verdict rune has.
             print(render_source_notice(statuses), file=err)
             print(
-                f"rune: {(judging + writing)[0]} needs metadata from the server; "
+                f"rune: {(judging + writing)[0]} needs metadata from a server; "
                 "nothing was read",
                 file=err,
             )
             return _EXIT_ERROR
+        if writing and any(s.status == "failed" for s in statuses):
+            # A server that would not answer is an unfinished audit, and an
+            # artifact written from one records four of six servers as the whole
+            # setup. The next run then reads the two missing ones as newly added
+            # and nobody knows whether they were ever reviewed. A server the
+            # config itself switched off is not a failure and does not block the
+            # write; it is simply not part of what the file covers.
+            print(render_source_notice(statuses), file=err)
+            print(
+                f"rune: {writing[0]} needs every server it covers to answer; "
+                "fix the server, or narrow the run with --server",
+                file=err,
+            )
+            return _EXIT_ERROR
+        scanned: list[str] | None = [name for name, _ in listings]
     else:
+        # No config, so exactly one server and no name for it. The pin records no
+        # server name in that case and is compared without one, which is what
+        # every pin written before rune could read a config looks like.
+        scanned = None
         try:
             if args.stdio:
                 from .client import LiveScanError, fetch_metadata
@@ -797,6 +806,7 @@ def main(
             return _EXIT_ERROR
 
         results = scan_targets(groups)
+        listings = [(None, groups)]
 
     wrote_artifact = False
     if args.write_baseline:
@@ -818,9 +828,11 @@ def main(
         wrote_artifact = True
 
     if args.write_pin:
-        from .pin import build_pin
+        from .pin import build_pin, pin_entities
 
-        pin_document = build_pin(groups)
+        pin_document = build_pin(
+            [e for src, g in listings for e in pin_entities(g, source=src)]
+        )
         try:
             with open(args.write_pin, "w", encoding="utf-8") as fh:
                 json.dump(pin_document, fh, indent=2, ensure_ascii=True)
@@ -839,11 +851,17 @@ def main(
     # nothing and exits clean. Both files can be written in one run: a first
     # review commits the findings it accepted and the text it accepted them for.
     if wrote_artifact:
+        # A file that covers four of six servers must say so as it is written,
+        # not the next time it is judged. Only a disabled server reaches here; a
+        # failed one has already refused the write.
+        if any(not s.ok for s in statuses):
+            print(render_source_notice(statuses), file=err)
         return _EXIT_CLEAN
 
     drifts: list[Drift] = []
+    unchecked: list[str] = []
     if args.pin:
-        from .pin import PinError, load_pin, pin_drift, pin_entities
+        from .pin import PinError, load_pin, pin_drift, pin_entities, scope_pin
 
         try:
             pinned = load_pin(args.pin)
@@ -853,7 +871,16 @@ def main(
         except (PinError, OSError) as exc:
             print(f"rune: cannot read pin: {exc}", file=err)
             return _EXIT_ERROR
-        drifts = pin_drift(pinned, pin_entities(groups))
+        try:
+            # Scoped to the servers this run actually opened, so a run narrowed
+            # with --server judges that server instead of reading the rest of the
+            # config as removed.
+            comparable, unchecked = scope_pin(pinned, scanned)
+        except PinError as exc:
+            print(f"rune: {exc}", file=err)
+            return _EXIT_ERROR
+        current = [e for src, g in listings for e in pin_entities(g, source=src)]
+        drifts = pin_drift(comparable, current)
 
     baselined = 0
     stale: list[BaselineEntry] = []
@@ -877,7 +904,11 @@ def main(
         # Taken before apply_baseline, which deletes exactly the findings the
         # baseline matched. Reading the scan afterwards would report every
         # working approval as stale.
-        stale = stale_entries(entries, current_fingerprints(results))
+        stale = stale_entries(
+            entries,
+            current_fingerprints(results),
+            scanned=set(scanned) if scanned is not None else None,
+        )
         baselined = apply_baseline(results, {e.fingerprint for e in entries})
 
     if args.sarif:
@@ -899,7 +930,12 @@ def main(
     elif args.json:
         print(
             render_json(
-                results, baselined=baselined, stale=stale, drifts=drifts, sources=statuses
+                results,
+                baselined=baselined,
+                stale=stale,
+                drifts=drifts,
+                unchecked=unchecked,
+                sources=statuses,
             ),
             file=out,
         )
@@ -924,6 +960,8 @@ def main(
         print(render_stale_notice(stale), file=err)
     if drifts:
         print(render_drift_notice(drifts), file=err)
+    if unchecked:
+        print(render_unchecked_notice(unchecked), file=err)
     if any(not s.ok for s in statuses):
         print(render_source_notice(statuses), file=err)
 

@@ -10,13 +10,21 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from pathlib import Path
 
 import pytest
 
 from rune.baseline import BaselineEntry, build_baseline, fingerprint
 from rune.cli import _redact, main
-from rune.config import ConfigError, ServerSpec, load_config, parse_config, select
+from rune.config import (
+    ConfigError,
+    ServerSpec,
+    load_config,
+    parse_config,
+    select,
+    strip_jsonc,
+)
 from rune.models import Finding, Severity, SourceStatus, ToolResult
 from rune.report import (
     render_config_text,
@@ -228,19 +236,167 @@ def test_a_file_with_no_server_list_raises(data: object, reason: str) -> None:
         parse_config(data)
 
 
-def test_jsonc_gets_a_hint(tmp_path: Path) -> None:
-    path = tmp_path / "mcp.json"
-    path.write_text('{\n  // vscode allows this\n  "servers": {}\n}', encoding="utf-8")
-    with pytest.raises(ConfigError, match="JSONC"):
-        load_config(str(path))
+# --- JSONC -------------------------------------------------------------------
+#
+# VS Code writes and documents mcp.json with comments in it, so a config that
+# every client reads has to be a config rune reads. The tests that matter most
+# here are the ones proving a valid file is NOT corrupted on the way in: a "//"
+# inside a URL is part of the URL, and a comma inside a description is text.
 
 
-def test_plain_bad_json_gets_no_jsonc_hint(tmp_path: Path) -> None:
+def _load_text(tmp_path: Path, text: str) -> list[ServerSpec]:
     path = tmp_path / "mcp.json"
-    path.write_text("{oops", encoding="utf-8")
-    with pytest.raises(ConfigError) as exc:
-        load_config(str(path))
-    assert "JSONC" not in str(exc.value)
+    path.write_text(text, encoding="utf-8")
+    return load_config(str(path))
+
+
+VSCODE_MCP_JSON = """\
+// Servers for this workspace. See the docs before adding one.
+{
+  "inputs": [
+    { "id": "key", "type": "promptString", "description": "API key" },
+  ],
+  "servers": {
+    /* the vendor's hosted endpoint, not ours */
+    "docs": {
+      "type": "http",
+      "url": "https://mcp.example.com/v1/mcp", // no trailing slash
+      "headers": { "X-Api-Key": "k" },
+    },
+    "local": {
+      "command": "node",
+      "args": ["server.js"], // built by `npm run build`
+    },
+  },
+}
+"""
+
+
+def test_a_vscode_config_with_comments_and_trailing_commas_is_read(tmp_path: Path) -> None:
+    specs = _load_text(tmp_path, VSCODE_MCP_JSON)
+    assert [s.name for s in specs] == ["docs", "local"]
+    assert specs[0].url == "https://mcp.example.com/v1/mcp"
+    assert specs[0].headers == {"X-Api-Key": "k"}
+    assert specs[1].command == "node"
+    assert specs[1].args == ("server.js",)
+
+
+def test_a_double_slash_inside_a_string_is_not_a_comment(tmp_path: Path) -> None:
+    # The failure that would matter: a URL truncated at its scheme, silently
+    # turning a scan of the vendor's endpoint into a scan of nothing.
+    specs = _load_text(tmp_path, '{"servers": {"a": {"url": "https://x.example/mcp"}}}')
+    assert specs[0].url == "https://x.example/mcp"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/*not a comment*/",
+        "a // b",
+        "trailing comma ,",
+        "brace after a comma ,}",
+        'an escaped quote \\" // still inside the string',
+        "a backslash at the end \\\\",
+    ],
+)
+def test_syntax_inside_a_string_stays_text(tmp_path: Path, value: str) -> None:
+    text = '{"servers": {"a": {"command": "x", "env": {"V": "' + value + '"}}}}'
+    specs = _load_text(tmp_path, text)
+    assert specs[0].env == {"V": json.loads('"' + value + '"')}
+
+
+def test_a_quote_inside_a_comment_does_not_open_a_string(tmp_path: Path) -> None:
+    # Comments are read before strings, so an unbalanced quote in a note cannot
+    # swallow the rest of the file as string content.
+    text = '{ /* he said "hi */ "servers": {"a": {"command": "x"}} } // don\'t\n'
+    assert [s.name for s in _load_text(tmp_path, text)] == ["a"]
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"mcpServers": {"a": {"command": "x", "args": ["--u", "https://e.example/a,b"]}}},
+        {"servers": {"": {"url": "", "headers": {"A": "*/,//"}}}},
+        {"mcpServers": {"a": {"command": "é\\\"/*", "args": []}}},
+    ],
+)
+def test_plain_json_is_returned_unchanged(doc: object) -> None:
+    for text in (json.dumps(doc), json.dumps(doc, indent=2), json.dumps(doc, indent=4)):
+        assert strip_jsonc(text) == text
+
+
+def test_a_real_json_file_survives_the_reader() -> None:
+    # examples/tools.json is full of the punctuation the payloads carry, which is
+    # the corpus most likely to trip a reader that guesses at what is quoted.
+    manifest = Path(__file__).resolve().parent.parent / "examples" / "tools.json"
+    text = manifest.read_text(encoding="utf-8")
+    assert strip_jsonc(text) == text
+
+
+def test_a_config_the_size_of_a_comment_is_still_linear() -> None:
+    entries = ",".join(
+        f'"s{i}": {{"command": "x", "args": ["a",]}}' for i in range(2000)
+    )
+    comment = "a comment line, with a comma,\n" * 4000
+    text = "/*\n" + comment + '*/\n{"servers": {' + entries + "}}"
+    start = time.perf_counter()
+    assert len(strip_jsonc(text)) == len(text)
+    assert time.perf_counter() - start < 2.0
+    assert len(parse_config(json.loads(strip_jsonc(text)))) == 2000
+
+
+def test_stripping_keeps_every_offset(tmp_path: Path) -> None:
+    # Comments become spaces rather than disappearing, so json's line and column
+    # still name the place the reader has open in their editor.
+    text = '// one\n/* two\n   three */\n{\n  "servers": oops\n}\n'
+    assert len(strip_jsonc(text)) == len(text)
+    with pytest.raises(ConfigError, match=r"line 5 column 14 \(char 41\)"):
+        _load_text(tmp_path, text)
+
+
+def test_a_comma_with_no_value_in_front_of_it_is_still_an_error(tmp_path: Path) -> None:
+    # A trailing comma is a comma after a value. Dropping any other one would
+    # read a malformed file as a well formed one.
+    for text in ('{"servers": {,}}', '{"servers": {"a": {"args": [1,,]}}}'):
+        with pytest.raises(ConfigError, match="not valid JSON"):
+            _load_text(tmp_path, text)
+
+
+def test_an_unterminated_block_comment_names_its_line(tmp_path: Path) -> None:
+    text = '{\n  "servers": {}\n}\n/* forgot to close this\n'
+    with pytest.raises(ConfigError, match="unterminated block comment opened on line 4"):
+        _load_text(tmp_path, text)
+
+
+def test_an_unterminated_string_is_reported_where_it_starts(tmp_path: Path) -> None:
+    # Nothing after the opening quote is stripped, so json still finds it.
+    with pytest.raises(ConfigError, match="Unterminated string starting at: line 1 column 31"):
+        _load_text(tmp_path, '{"servers": {"a": {"command": "x}}')
+
+
+def test_a_comment_ends_at_the_end_of_the_file(tmp_path: Path) -> None:
+    specs = _load_text(tmp_path, '{"servers": {"a": {"command": "x"}}} // done')
+    assert [s.name for s in specs] == ["a"]
+
+
+def test_a_block_comment_ends_at_its_first_close(tmp_path: Path) -> None:
+    # Block comments do not nest: the first */ closes the comment, and a later
+    # /* opens a new one instead of continuing the old. A reader that ran the
+    # first comment on to the last */ would swallow the servers between them.
+    text = '{ /* one /* still one */ "servers": {"a": {"command": "x"}} /* two */ }'
+    assert [s.name for s in _load_text(tmp_path, text)] == ["a"]
+
+
+def test_a_trailing_comma_behind_a_comment_is_still_trailing(tmp_path: Path) -> None:
+    specs = _load_text(
+        tmp_path, '{"servers": {"a": {"command": "x", "args": ["-v", // why\n]}}}'
+    )
+    assert specs[0].args == ("-v",)
+
+
+def test_a_file_that_is_broken_some_other_way_is_still_refused(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="not valid JSON"):
+        _load_text(tmp_path, "{oops")
 
 
 def test_select_narrows_and_keeps_config_order() -> None:
@@ -447,6 +603,21 @@ def test_missing_config_file_is_named(tmp_path: Path) -> None:
     code, _, err = _run(["--config", str(tmp_path / "nope.json")])
     assert code == 2
     assert "no such config" in err
+
+
+def test_the_cli_reads_a_commented_config(tmp_path: Path) -> None:
+    # The whole point of the JSONC reader is that the file a VS Code user already
+    # has is auditable, so prove it through the command they actually type. The
+    # one entry is unreadable, which fails before any process is started.
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        '{\n  // the one I added yesterday\n  "servers": {\n    "weather": {},\n  },\n}\n',
+        encoding="utf-8",
+    )
+    code, out, err = _run(["--config", str(path)])
+    assert code == 2
+    assert "cannot read config" not in err
+    assert "=== weather (unreadable) ===" in out
 
 
 def test_unreadable_config_exits_two(tmp_path: Path) -> None:

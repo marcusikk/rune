@@ -419,8 +419,9 @@ _SARIF_RULES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "injection-markup",
-        "Markup a model may read as an instruction boundary, such as <system> "
-        "or [INST].",
+        "Markup a model may read as an instruction boundary, such as <system>, "
+        "[INST], Llama's <<SYS>>, a Gemma turn marker, or a model special token "
+        "in the <|...|> frame.",
         "warning",
     ),
     (

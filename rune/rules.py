@@ -432,13 +432,14 @@ _CONCEALMENT = re.compile(
 
 # Structured markup that models are prone to treat as instructions.
 #
-# The instruction-boundary markers here are the ones the current model families
-# actually use, not one vendor's. Llama 2 wraps its system prompt in "<<SYS>>"
-# and closes it with "<</SYS>>"; Llama 3 and the GPT/ChatML families delimit
-# every turn with a "<|...|>" special token ("<|im_start|>", "<|eot_id|>",
-# "<|start_header_id|>", "<|endoftext|>"). A description that forges one of these
-# is telling the model a new turn or a new system block has begun, which is the
-# whole point of an injection, so all of them belong on this rule.
+# The instruction-boundary markers here are the ones the model families in
+# current use actually write, not one vendor's. Llama 2 wraps its system prompt
+# in "<<SYS>>" and closes it with "<</SYS>>"; Gemma opens and closes every turn
+# with "<start_of_turn>" and "<end_of_turn>"; Llama 3, the GPT/ChatML families
+# and DeepSeek delimit turns with a "<|...|>" special token ("<|im_start|>",
+# "<|eot_id|>", "<|start_header_id|>", "<|endoftext|>"). A description that
+# forges one of these is telling the model a new turn or a new system block has
+# begun, which is the whole point of an injection, so all of them belong here.
 #
 # The "<|...|>" branch matches the frame, not a hand-kept list of token names.
 # The frame is what is distinctive: the "<|" ... "|>" pair is reserved
@@ -448,11 +449,21 @@ _CONCEALMENT = re.compile(
 # list missed "<|eot_id|>" and would miss the next one too), and the inner name
 # is bounded to a bare identifier so a stray "<|" that happens to sit near a "|>"
 # in ordinary prose is not read as one.
+#
+# Two details the identifier has to allow for. U+2581, the sentencepiece word
+# separator, is how DeepSeek spells its token names ("<|begin U+2581 of U+2581
+# sentence|>"), and it is not a \w character, so it is named explicitly or the
+# whole family slips through. DeepSeek also writes the delimiters themselves as
+# the FULLWIDTH vertical line U+FF5C rather than the ASCII pipe; that form is
+# left to compatibility-characters, which normalises it back to this frame and
+# reports the same boundary, so the frame here stays ASCII and a hit is still
+# reported exactly once by whichever rule owns it.
 _INJECTION_MARKUP = re.compile(
-    r"</?(?:system|instructions?|important|admin|developer)>"
+    r"</?(?:system|instructions?|important|admin|developer"
+    r"|start_of_turn|end_of_turn)>"
     r"|<</?SYS>>"
     r"|\[/?INST\]"
-    r"|<\|[\w-]{1,40}\|>"
+    r"|<\|[\w\u2581-]{1,40}\|>"
     # A "## Instructions" heading is how people document a tool. Only a heading
     # that names the model's own context is a forged boundary.
     r"|(?:^|\n)[ \t]*#{1,6}[ \t]*(?:system|prompt)s?\b",

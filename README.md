@@ -569,7 +569,7 @@ file says which of them it describes.
 | `invisible-characters` | high | zero-width, bidirectional, and tag characters used to smuggle text past a human reviewer |
 | `confusable-characters` | high | a Cyrillic or Greek look-alike letter mixed into a Latin word (a Cyrillic `a` inside `account`), used to spoof a name or slip a payload past a reviewer and the other rules |
 | `compatibility-characters` | high | a payload typed in a Unicode compatibility variant of ASCII (fullwidth, mathematical, or circled letters) that normalizes to text another rule catches, used to slip it past the ASCII rules |
-| `injection-markup` | medium | fake instruction boundaries like `<system>`, `[INST]`, Llama's `<<SYS>>`, and model special tokens in the `<\|...\|>` frame (`<\|im_start\|>`, `<\|eot_id\|>`, `<\|endoftext\|>`) |
+| `injection-markup` | medium | fake instruction boundaries like `<system>`, `[INST]`, Llama's `<<SYS>>`, Gemma's `<start_of_turn>`, and model special tokens in the `<\|...\|>` frame (`<\|im_start\|>`, `<\|eot_id\|>`, `<\|endoftext\|>`) |
 | `name-collision` | medium | two tools (or two prompts) answering to one name, in one listing or across two servers of a `--config` scan: a server that claims the name of a tool you already trust shadows it, and the client picks which definition a call reaches |
 | `sensitive-file-access` | high | a directive to read a well-known credential file (an SSH private key, `~/.aws/credentials`, `.netrc`, an agent's own MCP config) that a poisoned tool uses to smuggle secrets out through a normal parameter |
 

@@ -25,7 +25,9 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
   raising, so one broken entry cannot cancel the audit of the rest. The file is
   read as JSONC: `strip_jsonc` blanks comments and trailing commas in place, so
   every offset survives and json's line and column still point into the file on
-  disk. Config files only; a manifest stays strict JSON.
+  disk. Config files only; a manifest stays strict JSON. `_Variables.expand`
+  then fills in the `${...}` placeholders the client would fill in, one pass so
+  a resolved value is never resolved again.
 - `rune/report.py` - text, JSON and SARIF rendering.
 - `rune/client.py` - live stdio scan via the MCP SDK (lazy import).
 - `rune/cli.py` - `main(argv, out, err)`, driven in-process by the tests.
@@ -54,6 +56,9 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
   of each string. `source` is written only on a `--config` scan, and a pin that
   names no server is adopted by the single server a run scanned, so every pin
   written before it keeps working and `_FORMAT_VERSION` stays 1.
+- A config placeholder rune cannot resolve is that entry's own error, never an
+  empty string: a guess would start a server the client does not start and
+  report the scan of it as the audit of the real one. See `tests/test_config.py`.
 - `--pin` and `--baseline` compare only the servers a run actually scanned. A
   server left out is named as unchecked, never reported as removed or stale:
   "rune did not look" is not "it is gone".

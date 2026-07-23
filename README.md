@@ -226,6 +226,40 @@ all fine. VS Code writes `mcp.json` that way and its own docs show it, and a
 config with a note above the entry you added last week is a working config, so
 rune scans it rather than telling you to go and edit it first.
 
+A committed config does not hold the token its server needs, it holds
+`${GITHUB_TOKEN}`, and a VS Code entry points at `${workspaceFolder}` rather
+than at an absolute path. rune fills in the same placeholders your client does:
+
+- `${GITHUB_TOKEN}` and `${env:GITHUB_TOKEN}` are that variable, read out of
+  rune's own environment, and `${PORT:-8080}` is `8080` when `PORT` is unset or
+  empty, the way the shell's `:-` reads
+- `${workspaceFolder}` and `${workspaceFolderBasename}` are the folder the
+  config file sits in, or the project above it when the file is in `.vscode/`;
+  `${userHome}` is your home directory
+- `${input:key}` and `${command:pick}` are refused by name, since only the
+  client that wrote them can answer: one by prompting you, the other by running
+  an editor command
+- anything else inside `${...}` is passed through exactly as written, so an
+  argument a server expands for itself is not rewritten behind its back
+
+What rune cannot resolve, it will not guess at. A variable nothing has set, and
+a `${input:...}` your client would stop and prompt a person for, are that
+entry's own problem, named on stderr and under its own heading, while the rest
+of the config is audited as usual:
+
+```
+=== github (unreadable) ===
+  not scanned: "env" value for 'GITHUB_PERSONAL_ACCESS_TOKEN' references ${GITHUB_TOKEN}, which is not set in this environment; export it and re-run
+```
+
+Putting an empty string there instead would start a server that is not the one
+your client starts, and then report the scan of it as the audit of the real
+thing. Export the variable and run it again, leave that entry out with
+`--server`, or, if the value genuinely does not change what the server lists,
+set it empty for the one command: `GITHUB_TOKEN= rune --config .mcp.json`. An
+entry marked `"disabled"` needs none of its variables, since rune never starts
+it.
+
 Common locations, if you are looking for yours:
 
 ```
@@ -238,8 +272,9 @@ Common locations, if you are looking for yours:
 
 `--config` starts every stdio server the file declares. Those are the same
 processes your MCP client starts every time it launches, and rune only lists
-metadata once and disconnects, but it is still your machine running them: point
-it at your own config, not at one somebody sent you. `--server NAME` narrows the
+metadata once and disconnects, but it is still your machine running them, with
+whatever variables the file names read out of your environment: point it at your
+own config, not at one somebody sent you. `--server NAME` narrows the
 run to one entry (repeat it for several) when you want to scan just the one you
 have added, and an entry marked `"disabled": true` is skipped and reported rather
 than started.
@@ -737,12 +772,17 @@ rune is a signal for human review, not a proof of safety.
 - `--config` reads JSONC, the JSON with comments and trailing commas that VS Code
   writes and documents, so the file you already have is the file rune scans. That
   applies to `--config` only: a manifest is a protocol payload, not something you
-  hand-edit, so `--manifest` and `-` stay strict JSON. Config values are passed
-  through as written: a `${env:TOKEN}` or `${input:key}` placeholder is sent to
-  the server literally, the way it appears in the file, so a server that depends
-  on the client expanding it will fail to start and be reported as unscanned.
-  Each server gets the same 20-second budget a single scan gets, so a large
-  config takes as long as its slowest servers.
+  hand-edit, so `--manifest` and `-` stay strict JSON. A config's placeholders
+  are resolved the way the client resolves them, in a `command`, an `args` entry,
+  a `cwd`, a `url`, and the values of `env` and `headers`: `${VAR}`,
+  `${VAR:-fallback}` and `${env:VAR}` out of rune's own environment, and
+  `${workspaceFolder}`, `${workspaceFolderBasename}` and `${userHome}` out of
+  where the file sits. A variable nothing has set, and a `${input:...}` the
+  client would prompt for, are refused by name on that entry rather than guessed
+  at. Everything else inside `${...}` is passed through as written, since rune
+  cannot know what it means to the server about to read it, and a resolved value
+  is never resolved a second time. Each server gets the same 20-second budget a
+  single scan gets, so a large config takes as long as its slowest servers.
 - Credentials rune reads out of a config are never printed. Env and header values
   are taken back out of any error message before it reaches a terminal or a CI
   log, and a URL is quoted back only with its userinfo and query string stripped.

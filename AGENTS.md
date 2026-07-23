@@ -22,7 +22,10 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
   one part of rune that is not a rule and emits no finding.
 - `rune/config.py` - parses an MCP client config (`mcpServers`/`servers`) into
   `ServerSpec`s. Never connects; a bad entry records its own `error` instead of
-  raising, so one broken entry cannot cancel the audit of the rest.
+  raising, so one broken entry cannot cancel the audit of the rest. The file is
+  read as JSONC: `strip_jsonc` blanks comments and trailing commas in place, so
+  every offset survives and json's line and column still point into the file on
+  disk. Config files only; a manifest stays strict JSON.
 - `rune/report.py` - text, JSON and SARIF rendering.
 - `rune/client.py` - live stdio scan via the MCP SDK (lazy import).
 - `rune/cli.py` - `main(argv, out, err)`, driven in-process by the tests.

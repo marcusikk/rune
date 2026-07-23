@@ -221,6 +221,11 @@ Streamable HTTP unless its path ends in `/sse`. `env` and `cwd` are passed to th
 server rune starts, layered over a minimal default environment, because a server
 that needs them does not start without them.
 
+The file is read as JSONC, so `//` and `/* */` comments and a trailing comma are
+all fine. VS Code writes `mcp.json` that way and its own docs show it, and a
+config with a note above the entry you added last week is a working config, so
+rune scans it rather than telling you to go and edit it first.
+
 Common locations, if you are looking for yours:
 
 ```
@@ -729,14 +734,15 @@ rune is a signal for human review, not a proof of safety.
   `instructions`. `--config` scans a whole MCP client config by opening each
   server it declares over that server's own transport, so every entry gets the
   same scan it would get on its own.
-- `--config` reads plain JSON. Some editors accept comments and trailing commas
-  in these files; rune says so when it hits one rather than leaving you to guess,
-  but it does not parse them. It also passes config values through as written: a
-  `${env:TOKEN}` or `${input:key}` placeholder is sent to the server literally,
-  the way it appears in the file, so a server that depends on the client
-  expanding it will fail to start and be reported as unscanned. Each server gets
-  the same 20-second budget a single scan gets, so a large config takes as long
-  as its slowest servers.
+- `--config` reads JSONC, the JSON with comments and trailing commas that VS Code
+  writes and documents, so the file you already have is the file rune scans. That
+  applies to `--config` only: a manifest is a protocol payload, not something you
+  hand-edit, so `--manifest` and `-` stay strict JSON. Config values are passed
+  through as written: a `${env:TOKEN}` or `${input:key}` placeholder is sent to
+  the server literally, the way it appears in the file, so a server that depends
+  on the client expanding it will fail to start and be reported as unscanned.
+  Each server gets the same 20-second budget a single scan gets, so a large
+  config takes as long as its slowest servers.
 - Credentials rune reads out of a config are never printed. Env and header values
   are taken back out of any error message before it reaches a terminal or a CI
   log, and a URL is quoted back only with its userinfo and query string stripped.

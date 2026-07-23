@@ -13,6 +13,11 @@ Cursor, Windsurf) or ``servers`` (VS Code). A definition is either local, with a
 ``command`` plus optional ``args``/``env``/``cwd``, or remote, with a ``url``
 plus optional ``headers``.
 
+The file is read as JSONC. VS Code documents and writes ``mcp.json`` with
+comments in it, and a config carrying a note above an entry is a working config
+for the client that reads it, so refusing to audit it was rune's problem rather
+than the reader's.
+
 Parsing is deliberately split from connecting. This module never opens a socket
 or starts a process; it validates the file and reports what it found. That is
 what lets the whole config be checked before the first server is launched, and
@@ -28,6 +33,7 @@ all, raises :class:`ConfigError`.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -242,23 +248,133 @@ def parse_config(data: Any) -> list[ServerSpec]:
     return specs
 
 
+# --- JSONC ------------------------------------------------------------------
+#
+# Two scans, each jumping between the characters that can change what the reader
+# is looking at, so a large file stays linear. Both are quote-aware, which is the
+# whole difficulty: the "//" in a URL and the comma in a description are not
+# syntax, and a reader that treats them as syntax corrupts a valid config.
+
+# The only characters that can open a comment or a string.
+_COMMENT_OR_STRING = re.compile(r'["/]')
+# Inside a string, the only two that matter: the closing quote and the backslash
+# that stops the next character from being one.
+_STRING_END = re.compile(r'["\\]')
+# The four characters JSON counts as whitespace. Anything else is a token, and
+# every token is significant to where a trailing comma sits.
+_SIGNIFICANT = re.compile(r"[^ \t\n\r]")
+
+
+def _end_of_string(text: str, quote: int) -> int:
+    """Index just past the string literal opening at *quote*.
+
+    An unterminated string runs to the end of the file. Returning that leaves
+    everything after it untouched, so json reports the unterminated string at its
+    real position instead of rune mangling the rest of the file first.
+    """
+    i = quote + 1
+    while True:
+        m = _STRING_END.search(text, i)
+        if m is None:
+            return len(text)
+        if m.group() == '"':
+            return m.end()
+        i = m.end() + 1  # a backslash escapes whatever follows it, quote included
+
+
+def _blank(chars: list[str], start: int, end: int) -> None:
+    """Overwrite a span with spaces, keeping its line breaks.
+
+    Every offset in the file survives, so a syntax error further down is still
+    reported at the line and column it occupies in the file the reader has open.
+    """
+    for i in range(start, end):
+        if chars[i] not in "\r\n":
+            chars[i] = " "
+
+
+def _strip_comments(text: str) -> str:
+    chars = list(text)
+    i = 0
+    while (m := _COMMENT_OR_STRING.search(text, i)) is not None:
+        at = m.start()
+        if text[at] == '"':
+            i = _end_of_string(text, at)
+            continue
+        after = text[at + 1 : at + 2]
+        if after == "/":
+            end = text.find("\n", at)
+            end = len(text) if end == -1 else end
+            _blank(chars, at, end)
+            i = end
+        elif after == "*":
+            close = text.find("*/", at + 2)
+            if close == -1:
+                # Blanking to the end of the file would report the error as a
+                # truncated config, which sends the reader looking at the wrong
+                # end of it. Name the comment that never closed instead.
+                line = text.count("\n", 0, at) + 1
+                raise ConfigError(f"unterminated block comment opened on line {line}")
+            _blank(chars, at, close + 2)
+            i = close + 2
+        else:
+            # A lone slash opens nothing and is not valid JSON either. Leaving it
+            # in place keeps json's error pointed at the character that caused it.
+            i = at + 1
+    return "".join(chars)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Drop each comma that closes a list or an object, on comment-free text.
+
+    Only a comma that follows a value is dropped. A comma with nothing in front
+    of it is not a trailing comma but a missing element, so ``{,}`` and ``[1,,]``
+    stay the errors they are rather than being quietly read as something else.
+    """
+    chars = list(text)
+    previous = ""  # the significant character before the one being read
+    comma = -1  # a comma waiting to find out what follows it
+    i = 0
+    while (m := _SIGNIFICANT.search(text, i)) is not None:
+        at = m.start()
+        char = text[at]
+        if char == '"':
+            previous, comma, i = '"', -1, _end_of_string(text, at)
+            continue
+        if char == ",":
+            comma = at if previous not in ("", "{", "[", ",") else -1
+        elif char in "}]" and comma != -1:
+            chars[comma] = " "
+            comma = -1
+        else:
+            comma = -1
+        previous = char
+        i = at + 1
+    return "".join(chars)
+
+
+def strip_jsonc(text: str) -> str:
+    """Read JSONC as the JSON underneath it, character offsets intact.
+
+    Comments become spaces and a trailing comma becomes a space, so the result is
+    the same length as the file and every line break is where it was. Text that
+    is already plain JSON comes back unchanged.
+    """
+    return _strip_trailing_commas(_strip_comments(text))
+
+
 def load_config(path: str) -> list[ServerSpec]:
     """Read a config file from disk into its server entries."""
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
+    stripped = strip_jsonc(text)
     try:
-        data = json.loads(text)
+        data = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        # VS Code and a few editors accept comments and trailing commas in these
-        # files. rune reads plain JSON, so say which one this looks like instead
-        # of leaving the reader to work out why their working config is refused.
-        hint = ""
-        if "//" in text or "/*" in text:
-            hint = (
-                " (the file looks like JSONC: strip the comments, or export the "
-                "config as plain JSON)"
-            )
-        raise ConfigError(f"not valid JSON: {exc}{hint}") from exc
+        raise ConfigError(
+            f"not valid JSON: {exc} (comments and trailing commas are read, so "
+            "this is something else)"
+        ) from exc
     return parse_config(data)
 
 

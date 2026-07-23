@@ -29,6 +29,15 @@ longer the one under that name. Reordering the listing changes nothing, since
 nothing here is positional except the fallback label of an entity that has no
 name of its own.
 
+A ``--config`` run scans every server the client is wired to, so identity gains
+the config's name for the server an entity came from. One pin then covers the
+whole setup, which is the only version of this that gates anything: a rug pull
+is not a thing you check on the one server you remembered to pin separately. The
+name is recorded only when there is one, so a pin taken of a single server is
+the same file it has always been. Comparison is scoped to the servers a run
+actually scanned, so narrowing with --server reports drift on that server rather
+than reporting the rest of the config as removed.
+
 A pin is not a baseline. A baseline records findings a human read and accepted,
 and it suppresses. A pin records the text a human read, and it fails. A
 baselined finding whose text is then edited is a pin drift, on purpose: approval
@@ -40,12 +49,15 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from .scan import KINDS, entity_label, walk_strings
+from .scan import KINDS, entity_label, render_visible, walk_strings
 
 # Bump when the digest inputs change in a way that invalidates existing files.
+# Recording the server a --config run read an entity from did NOT: the key is
+# absent from every pin written before it, and one of those is read against the
+# single server it describes exactly as it always was. See scope_pin.
 _FORMAT_VERSION = 1
 
 # How many changed field paths a single drift line names before it summarises
@@ -60,14 +72,26 @@ class PinError(ValueError):
 
 @dataclass(frozen=True)
 class PinnedEntity:
-    """One entity's metadata as a map of JSON path to digest of the text there."""
+    """One entity's metadata as a map of JSON path to digest of the text there.
+
+    ``source`` is the config's name for the server the entity was listed by, set
+    only on a ``--config`` run. It is ``None`` for a scan of a single server,
+    which has no name to record, and the key is then left out of the file
+    entirely: a pin written by any earlier build is still read, and re-writing
+    one produces no diff.
+    """
 
     kind: str
     name: str
     fields: dict[str, str]
+    source: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "name": self.name, "fields": dict(self.fields)}
+        entry: dict[str, Any] = {"kind": self.kind, "name": self.name}
+        if self.source is not None:
+            entry["source"] = self.source
+        entry["fields"] = dict(self.fields)
+        return entry
 
 
 def digest(text: str) -> str:
@@ -112,8 +136,14 @@ def _entity_fields(entity: dict[str, Any]) -> dict[str, str]:
     return fields
 
 
-def pin_entities(groups: dict[str, list[dict[str, Any]]]) -> list[PinnedEntity]:
-    """Digest every scannable string in every entity, in report order."""
+def pin_entities(
+    groups: dict[str, list[dict[str, Any]]], *, source: str | None = None
+) -> list[PinnedEntity]:
+    """Digest every scannable string in every entity, in report order.
+
+    ``source`` stamps the config's name for the server that listed them, and is
+    left unset for a scan of a single server.
+    """
     entities: list[PinnedEntity] = []
     for kind in KINDS:
         for index, entity in enumerate(groups.get(kind, [])):
@@ -122,19 +152,20 @@ def pin_entities(groups: dict[str, list[dict[str, Any]]]) -> list[PinnedEntity]:
                     kind=kind,
                     name=entity_label(entity, kind, index),
                     fields=_entity_fields(entity),
+                    source=source,
                 )
             )
     return entities
 
 
-def build_pin(groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    """Serialize the current metadata into a pin document."""
-    entities = pin_entities(groups)
+def build_pin(entities: Sequence[PinnedEntity]) -> dict[str, Any]:
+    """Serialize pinned entities into a pin document."""
     # Sorted so the file is stable across runs and diffs cleanly in version
-    # control. Python's sort is stable, so entities sharing a kind and a name
-    # keep the order they were listed in, which is the order they are compared
-    # in later.
-    ordered = sorted(entities, key=lambda e: (_kind_order(e.kind), e.name))
+    # control. Python's sort is stable, so entities sharing a source, a kind and
+    # a name keep the order they were listed in, which is the order they are
+    # compared in later. Server first, so one config's pin reads and diffs
+    # server by server rather than interleaving them.
+    ordered = sorted(entities, key=lambda e: (e.source or "", _kind_order(e.kind), e.name))
     return {
         "version": _FORMAT_VERSION,
         "entities": [e.as_dict() for e in ordered],
@@ -187,7 +218,17 @@ def load_pin(path: str) -> list[PinnedEntity]:
         kind, name = entry.get("kind"), entry.get("name")
         if not isinstance(kind, str) or not isinstance(name, str):
             raise PinError('a pin entry is missing its "kind" or "name"')
-        loaded.append(PinnedEntity(kind=kind, name=name, fields=_fields(entry.get("fields"))))
+        source = entry.get("source")
+        if source is not None and not isinstance(source, str):
+            raise PinError('a pin entry\'s "source" must be a string')
+        loaded.append(
+            PinnedEntity(
+                kind=kind,
+                name=name,
+                fields=_fields(entry.get("fields")),
+                source=source,
+            )
+        )
     return loaded
 
 
@@ -201,10 +242,17 @@ class Drift:
     # The JSON paths that differ, on a "changed" drift only, and never empty
     # there: an entity that differs nowhere is not reported at all.
     paths: tuple[str, ...] = ()
+    # Which server this entity belongs to, on a --config run only.
+    source: str | None = None
 
     @property
     def label(self) -> str:
         where = f"{self.kind} {self.name}"
+        # A whole-config pin can hold two entities that differ only by which
+        # server declared them, so a drift on one names it. Left off entirely
+        # for a single-server scan, which reads as it always has.
+        if self.source is not None:
+            where = f"{self.source}: {where}"
         if self.change != "changed":
             return f"{where}  {self.change} since the pin"
         listed = ", ".join(self.paths[:_MAX_LISTED_PATHS])
@@ -214,26 +262,103 @@ class Drift:
         return f"{where}  changed: {listed}"
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "name": self.name,
-            "change": self.change,
-            "paths": list(self.paths),
-        }
+        entry: dict[str, Any] = {"kind": self.kind, "name": self.name}
+        if self.source is not None:
+            entry["source"] = self.source
+        entry["change"] = self.change
+        entry["paths"] = list(self.paths)
+        return entry
 
 
-def _grouped(entities: Sequence[PinnedEntity]) -> dict[tuple[str, str], list[PinnedEntity]]:
-    """Bucket entities by (kind, name), keeping listing order within a bucket.
+_Key = tuple[str | None, str, str]
+
+
+def _grouped(entities: Sequence[PinnedEntity]) -> dict[_Key, list[PinnedEntity]]:
+    """Bucket entities by (source, kind, name), keeping listing order in a bucket.
 
     MCP names are meant to be unique per kind, but a manifest is a file and can
     hold two tools called the same thing. Bucketing rather than keying by name
     means the second one is compared and reported instead of silently replacing
     the first, which is the shape an attacker would use to hide one.
+
+    The server is part of the key because two servers in one config can each
+    declare a tool called ``search``, and the text approved for one is not an
+    approval of the other's.
     """
-    buckets: dict[tuple[str, str], list[PinnedEntity]] = {}
+    buckets: dict[_Key, list[PinnedEntity]] = {}
     for entity in entities:
-        buckets.setdefault((entity.kind, entity.name), []).append(entity)
+        buckets.setdefault((entity.source, entity.kind, entity.name), []).append(entity)
     return buckets
+
+
+def _display(source: str | None) -> str:
+    """How a server name is written in a message about the pin file itself.
+
+    The name is returned exactly as the pin recorded it: the unchecked list is
+    a data surface (--json carries it as pinUnchecked), so it keeps the text the
+    server was configured under. A message built for a human has to escape it
+    with render_visible instead, because a PinError's text is printed as a line
+    of rune's own prose and a newline in a name would let the pin file write
+    lines of the report.
+    """
+    return "(no server recorded)" if source is None else source
+
+
+def scope_pin(
+    pinned: Sequence[PinnedEntity], scanned: Sequence[str] | None
+) -> tuple[list[PinnedEntity], list[str]]:
+    """Line a pin up with the servers this run actually scanned.
+
+    Returns the entities to compare and the names of the pinned servers this run
+    did not cover. Those are left out of the comparison rather than reported as
+    removed: a run narrowed with --server, a server the config switched off, and
+    a server that has been taken out of the config entirely all mean rune did not
+    look, and "I did not look" is not "it is gone". The caller names them, so a
+    partial check is never mistaken for a whole one.
+
+    A pin that names no server at all is one written from a scan of a single
+    server, by this build or any earlier one. It is adopted by the one server a
+    run scanned, which is the comparison it was written for and keeps every pin
+    on disk working. Judged against several servers there is nothing to adopt it,
+    so the run is refused rather than being told every entity was removed.
+    """
+    if not pinned:
+        return [], []
+
+    sources = {e.source for e in pinned}
+    if scanned is None:
+        # A scan of one unnamed server: a manifest, --stdio, --http or --sse.
+        # Names in the pin cannot discriminate anything here, so they are dropped
+        # and the comparison is the one it has always been, unless the file
+        # describes more than one server, which this run cannot be.
+        if len(sources) > 1:
+            named = ", ".join(sorted(render_visible(_display(s)) for s in sources))
+            raise PinError(
+                f"this pin covers {len(sources)} servers ({named}); "
+                "judge it with --config, adding --server NAME to pick one out of it"
+            )
+        return [replace(e, source=None) for e in pinned], []
+
+    covered = set(scanned)
+    if sources == {None}:
+        if len(covered) != 1:
+            raise PinError(
+                "this pin was written from a scan of a single server and does not "
+                "name one; add --server NAME to say which server in the config it "
+                "describes, or re-run with --write-pin to pin them all"
+            )
+        return [replace(e, source=next(iter(covered))) for e in pinned], []
+
+    comparable = [e for e in pinned if e.source in covered]
+    unchecked = sorted(_display(s) for s in sources if s not in covered)
+    if not comparable:
+        # Escaped here rather than in unchecked itself: the message is prose,
+        # the returned list is data and keeps the exact names.
+        raise PinError(
+            "this pin names no server this run scanned; it covers "
+            + ", ".join(render_visible(n) for n in unchecked)
+        )
+    return comparable, unchecked
 
 
 def _changed_paths(old: dict[str, str], new: dict[str, str]) -> tuple[str, ...]:
@@ -250,18 +375,26 @@ def pin_drift(
     missing tool cannot poison anything by itself. Reporting it is also what
     makes the vanish-and-return trick visible, where a tool is pulled from a
     listing while it is being audited and put back afterwards.
+
+    Pass ``pinned`` through :func:`scope_pin` first on a run that covers a
+    config, so a server this run did not scan is not read as a server whose
+    every entity was removed.
     """
     old, new = _grouped(pinned), _grouped(current)
     drifts: list[Drift] = []
-    for kind, name in sorted(old.keys() | new.keys(), key=lambda k: (_kind_order(k[0]), k[1])):
-        befores, afters = old.get((kind, name), []), new.get((kind, name), [])
+    keys = sorted(
+        old.keys() | new.keys(), key=lambda k: (k[0] or "", _kind_order(k[1]), k[2])
+    )
+    for key in keys:
+        source, kind, name = key
+        befores, afters = old.get(key, []), new.get(key, [])
         for i in range(max(len(befores), len(afters))):
             if i >= len(afters):
-                drifts.append(Drift(kind, name, "removed"))
+                drifts.append(Drift(kind, name, "removed", source=source))
             elif i >= len(befores):
-                drifts.append(Drift(kind, name, "added"))
+                drifts.append(Drift(kind, name, "added", source=source))
             else:
                 paths = _changed_paths(befores[i].fields, afters[i].fields)
                 if paths:
-                    drifts.append(Drift(kind, name, "changed", paths))
+                    drifts.append(Drift(kind, name, "changed", paths, source=source))
     return drifts

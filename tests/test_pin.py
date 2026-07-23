@@ -569,9 +569,12 @@ def test_build_pin_is_sorted_by_kind_then_name() -> None:
         "tool": [{"name": "zeta"}, {"name": "alpha"}],
         "prompt": [{"name": "beta"}],
     }
-    document = build_pin(groups)
+    document = build_pin(pin_entities(groups))
     assert [(e["kind"], e["name"]) for e in document["entities"]] == [
         ("tool", "alpha"),
         ("tool", "zeta"),
         ("prompt", "beta"),
     ]
+    # An entity with no server recorded writes no "source" key at all, so a pin
+    # of a single server is the same file every earlier build wrote.
+    assert all("source" not in e for e in document["entities"])

@@ -233,18 +233,30 @@ def current_fingerprints(results: list[ToolResult]) -> set[str]:
 
 
 def stale_entries(
-    entries: list[BaselineEntry], present: set[str]
+    entries: list[BaselineEntry],
+    present: set[str],
+    *,
+    scanned: set[str] | None = None,
 ) -> list[BaselineEntry]:
     """The recorded approvals no current finding claimed, in file order.
 
     Deduplicated by fingerprint, so a file that lists the same approval twice is
     reported once. ``present`` must come from current_fingerprints on results
     that have not been filtered yet.
+
+    ``scanned`` names the servers a ``--config`` run covered. An entry recorded
+    against a server outside that set matched nothing because rune did not look
+    at that server, not because the finding is gone, so it is not reported: a
+    baseline covering a whole config would otherwise report most of itself as
+    stale every time a run is narrowed with --server. An entry that records no
+    server is reported either way, which is what it has always done.
     """
     stale: list[BaselineEntry] = []
     seen: set[str] = set()
     for entry in entries:
         if entry.fingerprint in present or entry.fingerprint in seen:
+            continue
+        if scanned is not None and entry.source and entry.source not in scanned:
             continue
         seen.add(entry.fingerprint)
         stale.append(entry)

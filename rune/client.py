@@ -33,6 +33,14 @@ class LiveScanError(RuntimeError):
     """Raised when the server cannot be reached or listed."""
 
 
+# A single listing that never stops paging is refused after this many distinct
+# cursors. It is far past any real listing (a server with tens of thousands of
+# tools still pages in well under this) and exists only so an endless stream of
+# fresh cursors ends as _list_all's own named refusal, not as the scan timeout
+# firing mid-loop and reaching the user as an opaque task-group teardown error.
+_MAX_LISTING_PAGES = 1000
+
+
 def fetch_metadata(
     command: str,
     args: list[str],
@@ -258,8 +266,11 @@ async def _list_all(method: Any, field: str, what: str) -> list[Any]:
     A cursor rune has already sent back means the server is walking the listing
     in a circle. That is refused by name rather than ridden until the timeout,
     and the cursor's value is server-supplied text, so the message does not
-    quote it. A server inventing endless distinct cursors is bounded by the
-    overall scan timeout like any other stall.
+    quote it. A server inventing endless *distinct* cursors slips that guard,
+    since no cursor ever repeats, so the loop carries its own page bound: it
+    stops with a named refusal after ``_MAX_LISTING_PAGES`` cursors rather than
+    running until the scan timeout, whose teardown race would otherwise mask the
+    real cause behind an opaque task-group error.
     """
     items: list[Any] = []
     seen: set[str] = set()
@@ -273,6 +284,11 @@ async def _list_all(method: Any, field: str, what: str) -> list[Any]:
             raise LiveScanError(
                 f"server's {what} listing repeats a pagination cursor instead "
                 "of ending; refusing to follow it in a circle"
+            )
+        if len(seen) >= _MAX_LISTING_PAGES:
+            raise LiveScanError(
+                f"server's {what} listing did not end after {_MAX_LISTING_PAGES} "
+                "pages of distinct cursors; refusing to page it further"
             )
         seen.add(cursor)
         try:

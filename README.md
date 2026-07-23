@@ -135,10 +135,11 @@ for metadata it never read, so it exits `2` instead and tells you to either
 capture the listing through to its last page or point `--stdio`, `--http` or
 `--sse` at the server, where rune follows the cursor itself. A
 `"nextCursor": null` on a final page is fine, since it carries no page to miss.
-When rune connects live it fetches every page before judging anything, and a
-server that answers a cursor with the same cursor again is reported as a
-refusal by name rather than followed in a circle until the scan budget kills
-it.
+When rune connects live it fetches every page before judging anything. A server
+that answers a cursor with the same cursor again, or that keeps inventing fresh
+cursors past a generous page bound, is reported as a refusal by name rather than
+paged until the scan timeout kills the run and reaches you as an opaque
+task-group error.
 
 Unlike a tool, prompt, or resource listing, server metadata is read only from
 the top-level object, not unwrapped from a `result` envelope: a raw JSON-RPC

@@ -1190,6 +1190,37 @@ def test_cursor_under_a_result_envelope_is_refused(tmp_path: Path) -> None:
     assert "nextCursor" in err
 
 
+def test_null_cursor_under_a_result_envelope_still_scans(tmp_path: Path) -> None:
+    # A last page spells "no more pages" as "nextCursor": null, and that page can
+    # arrive wrapped in a JSON-RPC "result" like the listing does. The unwrap must
+    # read it as a complete listing and scan it, not mistake the null for a
+    # truncated capture and refuse. Poison proves the listing was actually read.
+    manifest = _write(
+        tmp_path,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": _POISONED, "nextCursor": None},
+        },
+    )
+    code, out, _ = _run([manifest])
+    assert code == 1
+    assert "data-exfiltration" in out
+
+
+def test_sse_frame_carrying_a_cursor_is_refused() -> None:
+    # A tools/list reply captured as an event stream can carry a nextCursor in its
+    # data: frame just as a bare JSON body can. Lifting the reply out of the SSE
+    # framing must not lose the truncation check: this is one page of a longer
+    # listing, so it is an exit 2, never a CLEAN over the pages that were not sent.
+    stream = _sse_message(_envelope({"tools": [_CLEAN_TOOL], "nextCursor": "abc"}))
+    code, out, err = _run(["-"], stdin=stream)
+    assert code == 2
+    assert "nextCursor" in err
+    assert "paginated" in err
+    assert "CLEAN" not in out
+
+
 def test_piped_page_with_a_cursor_is_refused_on_stdin(tmp_path: Path) -> None:
     # The documented curl | rune - pipe is where a single captured page is most
     # likely to come from, so the refusal has to hold there too.

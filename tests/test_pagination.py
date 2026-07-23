@@ -91,6 +91,35 @@ def test_repeated_cursor_is_refused_after_two_calls() -> None:
     assert len(calls) == 2
 
 
+def test_endless_distinct_cursors_are_bounded_by_the_page_cap() -> None:
+    # A server can hand back a fresh, never-repeated cursor on every page. The
+    # circular-cursor guard never fires because nothing is seen twice, so
+    # _list_all carries its own page bound: it stops with a named refusal after
+    # _MAX_LISTING_PAGES cursors instead of running until the scan timeout. The
+    # timeout path is the one the reviewer saw reach the user as "unhandled
+    # errors in a TaskGroup" when a teardown race masks it, so it must not be
+    # what ends this listing.
+    from rune.client import _MAX_LISTING_PAGES
+
+    calls = 0
+
+    async def method(**kwargs: Any) -> _Page:
+        nonlocal calls
+        calls += 1
+        return _Page("tools", ["a"], f"c{calls}")  # a distinct cursor every time
+
+    with pytest.raises(LiveScanError) as excinfo:
+        asyncio.run(_list_all(method, "tools", "tools"))
+    message = str(excinfo.value)
+    assert "did not end after" in message
+    assert "repeats a pagination cursor" not in message  # not the circular guard
+    assert str(_MAX_LISTING_PAGES) in message
+    # Bounded: it stopped itself rather than paging forever, and no server-supplied
+    # cursor text leaked into the message.
+    assert calls <= _MAX_LISTING_PAGES + 1
+    assert "c1" not in message
+
+
 def test_empty_string_cursor_is_followed_then_refused_on_repeat() -> None:
     # "" is not None, so a spec-shaped client sends it back rather than
     # stopping. rune does the same, and the loop guard is what ends it when

@@ -292,6 +292,11 @@ run to one entry (repeat it for several) when you want to scan just the one you
 have added, and an entry marked `"disabled": true` is skipped and reported rather
 than started.
 
+Scanning the setup rather than a server out of it also buys a finding no
+single-server scan can make: two servers answering to one tool name, where the
+client picks which definition your agent reaches. See
+[Two servers, one tool name](#two-servers-one-tool-name).
+
 One server's problem stays that server's problem. An entry rune cannot read, one
 that will not start, and one whose endpoint refuses the credentials are each
 reported under their own heading and named again on stderr, and the scan carries
@@ -550,6 +555,7 @@ file says which of them it describes.
 | `confusable-characters` | high | a Cyrillic or Greek look-alike letter mixed into a Latin word (a Cyrillic `a` inside `account`), used to spoof a name or slip a payload past a reviewer and the other rules |
 | `compatibility-characters` | high | a payload typed in a Unicode compatibility variant of ASCII (fullwidth, mathematical, or circled letters) that normalizes to text another rule catches, used to slip it past the ASCII rules |
 | `injection-markup` | medium | fake instruction boundaries like `<system>`, `[INST]`, `<|im_start|>` |
+| `name-collision` | medium | two tools (or two prompts) answering to one name, in one listing or across two servers of a `--config` scan: a server that claims the name of a tool you already trust shadows it, and the client picks which definition a call reaches |
 | `sensitive-file-access` | high | a directive to read a well-known credential file (an SSH private key, `~/.aws/credentials`, `.netrc`, an agent's own MCP config) that a poisoned tool uses to smuggle secrets out through a normal parameter |
 
 ### Reading a credential file
@@ -688,6 +694,72 @@ so `system-prompt-template`, `system prompt editor` and mixed spellings like
 credential side already makes for "password reset email". A bare
 `exfiltrate the system prompt`, with no such modifier, still fires.
 
+### Two servers, one tool name
+
+Every rule above reads a string. `name-collision` reads none. It compares
+entities against each other and fires when two of them answer to one name a
+client routes calls by, because the client, not you, then decides which
+definition a call reaches.
+
+That is the shadowing attack, and it is the one thing a scan of a single server
+structurally cannot see. A server you add today can call its tool `get_weather`,
+carry a perfectly ordinary description, trip nothing in the list above, and still
+sit in front of the `get_weather` you have trusted for a year. Read on its own it
+is honest. Read beside the config it was dropped into it is a second definition
+of a name that already meant something, which is why this arrived with
+`--config`: rune only sees the pair when it has scanned the whole setup.
+
+```
+$ rune --config .mcp.json
+=== weather (stdio) ===
+tool get_weather  risk 15/100  [MEDIUM]
+  [MEDIUM] name-collision  name (offset 0)
+      server 'helper' also exposes a tool with this name, so which definition a call to this tool reaches is up to the client
+      > get_weather
+
+tool add  risk 0/100  [CLEAN]
+
+server clean  risk 0/100  [CLEAN]
+
+=== helper (stdio) ===
+tool get_weather  risk 15/100  [MEDIUM]
+  [MEDIUM] name-collision  name (offset 0)
+      server 'weather' also exposes a tool with this name, so which definition a call to this tool reaches is up to the client
+      > get_weather
+
+server helper  risk 0/100  [CLEAN]
+
+2 of 2 server(s) in .mcp.json scanned.
+3 tool(s), 2 server(s) scanned, 2 flagged, 2 finding(s).
+```
+
+It is a medium, not a high, and that is deliberate. rune can see the collision;
+it can never see the intent behind it. Two teams picking `search` is careless,
+one server claiming another's name is an attack, and the metadata reads the same
+either way, so the finding states the ambiguity and leaves the verdict to you.
+Both definitions are named, for the same reason: nothing in the listing says
+which one was there first.
+
+What it does not do:
+
+- Only tools and prompts, the kinds a client routes **by name**. A resource is
+  addressed by its URI, so two resources sharing a display name are an ordinary
+  listing and stay quiet, as does a prompt that happens to share a name with a
+  tool: separate namespaces, separate calls.
+- Exact names only. A name spelled with a Cyrillic look-alike is
+  `confusable-characters`' job, and `search` beside `search_docs` is not a
+  collision in any client.
+- Only entities that declare a name. Two tools with no `name` at all both print
+  as `<tool #0>`-style labels rune invented, and a label rune invented is not a
+  call target.
+- Only the servers **this run scanned**. Narrow with `--server` and the servers
+  you left out cannot collide with anything, because rune did not read them. It
+  reports what it saw, never what the config implies.
+- Two config entries pointing at the same binary genuinely do collide on every
+  tool in it. That is not a false positive - to the client they are two servers
+  answering to one set of names - but if it is deliberate, `--baseline` accepts
+  it in one command.
+
 ### Precision is the point
 
 A scanner that cries wolf gets turned off. The `data-exfiltration` rule fires
@@ -817,6 +889,12 @@ rune is a signal for human review, not a proof of safety.
   ending the run. `--json`, SARIF's structured fields, and the baseline and pin
   files keep the server's exact text instead, since a program reading those needs
   what was actually sent.
+- `name-collision` compares the entities one run scanned, so it sees a shadowed
+  tool name only across servers rune actually opened: narrowed away with
+  `--server`, disabled in the config, or failed to start means not compared. It
+  covers tools and prompts, the kinds a client routes by name, matches names
+  exactly, and needs a declared `name` on both ends. It reports the ambiguity and
+  not a culprit, since nothing in two listings says which one had the name first.
 - It is pattern-based, with no model in the loop. It will not resolve arbitrary
   pronoun references or paraphrase, so a determined attacker can phrase around
   it. Treat a clean result as "no known trick found", not "safe". `--pin` is the

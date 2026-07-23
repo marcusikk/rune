@@ -1067,7 +1067,15 @@ def test_one_pin_covers_every_server_in_the_config(
 ) -> None:
     # A rug pull is not something you catch on the one server you remembered to
     # pin by hand, so the pin covers the setup, not a server out of it.
-    _serve(monkeypatch, {"weather": _listing("Forecast."), "notes": _listing("Sync notes.")})
+    # Distinct tool names, so the only thing that can move the exit code here is
+    # the pin (two servers answering to one tool name is its own finding).
+    _serve(
+        monkeypatch,
+        {
+            "weather": _listing("Forecast.", name="forecast"),
+            "notes": _listing("Sync notes.", name="sync_notes"),
+        },
+    )
     config = _two_servers(tmp_path)
 
     pin = tmp_path / "mcp.pin.json"
@@ -1455,7 +1463,16 @@ def test_a_baseline_entry_for_an_unscanned_server_is_not_stale(
     # Narrowing the run to one server must not report the other server's
     # approvals as fossils, or a whole-config baseline reads as mostly dead
     # every time somebody scans one entry out of it.
-    _serve(monkeypatch, {"weather": _listing(_EXFIL), "notes": _listing(_EXFIL)})
+    # Distinct tool names: a name two servers share is a finding on both, and it
+    # is a finding the narrowed run genuinely no longer makes, which would be a
+    # second reason for an entry to read as stale and confound this one.
+    _serve(
+        monkeypatch,
+        {
+            "weather": _listing(_EXFIL, name="forecast"),
+            "notes": _listing(_EXFIL, name="sync_notes"),
+        },
+    )
     config = _two_servers(tmp_path)
     baseline = tmp_path / "mcp.baseline.json"
     assert _run(["--config", config, "--write-baseline", str(baseline)])[0] == 0
@@ -1476,7 +1493,13 @@ def test_a_baseline_entry_for_an_unscanned_server_is_not_stale(
 
     # Control: an approval for a server this run DID scan, whose finding is gone,
     # is still reported. The scoping above must not swallow that.
-    _serve(monkeypatch, {"weather": _listing("Forecast."), "notes": _listing(_EXFIL)})
+    _serve(
+        monkeypatch,
+        {
+            "weather": _listing("Forecast.", name="forecast"),
+            "notes": _listing(_EXFIL, name="sync_notes"),
+        },
+    )
     code, _, err = _run(
         [
             "--config",
@@ -1490,7 +1513,7 @@ def test_a_baseline_entry_for_an_unscanned_server_is_not_stale(
     )
     assert code == 1
     assert "1 baseline entry(s) matched nothing in this scan:" in err
-    assert "weather: tool search" in err
+    assert "weather: tool forecast" in err
 
 
 def test_a_disabled_only_config_scans_nothing_and_stays_clean(tmp_path: Path) -> None:

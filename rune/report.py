@@ -413,6 +413,13 @@ _SARIF_RULES: tuple[tuple[str, str, str], ...] = (
         "warning",
     ),
     (
+        "name-collision",
+        "Two entities answer to one name a client routes calls by, so which "
+        "definition a call reaches is up to the client. A server that claims "
+        "the name of a tool already in the config shadows it.",
+        "warning",
+    ),
+    (
         "sensitive-file-access",
         "A directive to read a well-known credential or secret file, such as an "
         "SSH private key or cloud credentials.",

@@ -6,7 +6,8 @@ Notes for automated agents working in this repo.
 
 A scanner that reads MCP metadata (name, description, JSON schema) for tools,
 prompts, and resources, and flags hidden instructions: data exfiltration,
-injection, concealment, invisible characters, and fake instruction markup. It
+injection, concealment, invisible characters, fake instruction markup, and one
+tool name claimed by two servers. It
 lists only: it never calls a tool, renders a prompt, or reads a resource body.
 
 ## Layout
@@ -17,6 +18,11 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
 - `rune/scan.py` - walks an entity dict (tool, prompt, or resource), tags each
   hit with its JSON path, and rolls findings into a 0-100 score and a band.
   `scan_targets` groups the kinds; each result carries its `kind`.
+  `flag_name_collisions` is the one finding that reads no text: it runs once over
+  the whole scan, after every server has been listed, and flags entities that
+  share the name a client routes calls by. Its rule id lives in
+  `rules.STRUCTURAL_RULE_IDS`, so a consumer keying a table off rune's rules
+  (the SARIF driver) covers `ALL_RULE_IDS`, not just `RULE_IDS`.
 - `rune/pin.py` - digests every string `scan.walk_strings` yields and diffs a
   scan against a recorded pin. Detection by change, not by pattern, so it is the
   one part of rune that is not a rule and emits no finding.

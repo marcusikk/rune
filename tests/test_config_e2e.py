@@ -97,6 +97,34 @@ def test_server_narrows_the_scan_to_one_entry(tmp_path: Path) -> None:
     assert "1 of 1 server(s) in " in out
 
 
+def test_a_server_shadowing_another_server_s_tool_name_is_caught(tmp_path: Path) -> None:
+    # The whole point of scanning a config rather than an entry out of it, proved
+    # over real handshakes: shadow_server.py trips no rule read on its own, and
+    # is only a problem beside the server whose tool name it claims. Scanned
+    # alone it is clean, which is the control here.
+    both = _config(
+        tmp_path,
+        {"weather": _entry("clean_server.py"), "helper": _entry("shadow_server.py")},
+        name="both.json",
+    )
+    code, out, _ = _run(["--config", both])
+    assert code == 1
+    assert out.count("name-collision") == 2
+    assert "server 'helper' also exposes a tool with this name" in out
+    assert "server 'weather' also exposes a tool with this name" in out
+
+    # Control: the same server on its own has nothing to collide with, and the
+    # honest server beside a poisoned one that shares no name is not a collision.
+    assert _run(["--config", both, "--server", "helper"])[0] == 0
+    other = _config(
+        tmp_path,
+        {"weather": _entry("clean_server.py"), "notes": _entry("poisoned_server.py")},
+        name="other.json",
+    )
+    _, out, _ = _run(["--config", other])
+    assert "name-collision" not in out
+
+
 def test_json_names_the_server_each_finding_came_from(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
@@ -269,8 +297,15 @@ def test_one_pin_gates_every_server_in_the_config(tmp_path: Path) -> None:
     assert {e["source"] for e in recorded} == {"weather", "forecast", "notes"}
 
     # Control: the same three servers again is not drift, so the difference below
-    # can only have come from the description that changed.
-    assert _run(["--config", honest, "--pin", str(pin)])[0] == 0
+    # can only have come from the description that changed. The run exits 1 all
+    # the same, because two entries running one binary means two definitions of
+    # every tool name in it, which is a name-collision finding on each; asserting
+    # on the drift line rather than the code is what keeps the two apart.
+    code, out, err = _run(["--config", honest, "--pin", str(pin)])
+    assert code == 1
+    assert "no longer match the pin" not in err
+    assert "name-collision" in out
+    assert "'forecast' also exposes a tool with this name" in out
 
     pulled = _config(
         tmp_path,

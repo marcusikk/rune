@@ -1127,6 +1127,18 @@ RULE_IDS: frozenset[str] = frozenset(
     rule_id for rule in _TEXT_RULES for rule_id in rule.rule_ids
 )
 
+# A rule that reads no text. Two entities colliding on the name a client routes
+# by is a property of the listing, not of any one string in it, so it is decided
+# by comparing entities (see scan.flag_name_collisions) and can never come out
+# of scan_text. Declared here so rune has one registry of rule ids: a consumer
+# that keys a table off the rules (the SARIF driver) has to cover this one too.
+NAME_COLLISION = "name-collision"
+
+STRUCTURAL_RULE_IDS: frozenset[str] = frozenset({NAME_COLLISION})
+
+# Every rule id rune can report, whatever decided it.
+ALL_RULE_IDS: frozenset[str] = RULE_IDS | STRUCTURAL_RULE_IDS
+
 
 def scan_text(text: str) -> list[Hit]:
     """Run every rule over one string, sorted by offset."""

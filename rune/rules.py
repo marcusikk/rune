@@ -431,10 +431,28 @@ _CONCEALMENT = re.compile(
 )
 
 # Structured markup that models are prone to treat as instructions.
+#
+# The instruction-boundary markers here are the ones the current model families
+# actually use, not one vendor's. Llama 2 wraps its system prompt in "<<SYS>>"
+# and closes it with "<</SYS>>"; Llama 3 and the GPT/ChatML families delimit
+# every turn with a "<|...|>" special token ("<|im_start|>", "<|eot_id|>",
+# "<|start_header_id|>", "<|endoftext|>"). A description that forges one of these
+# is telling the model a new turn or a new system block has begun, which is the
+# whole point of an injection, so all of them belong on this rule.
+#
+# The "<|...|>" branch matches the frame, not a hand-kept list of token names.
+# The frame is what is distinctive: the "<|" ... "|>" pair is reserved
+# special-token syntax that a human-readable tool description never writes, while
+# the name inside it is a moving target as new model families ship new tokens.
+# Matching the frame catches those without re-widening the rule (an enumerated
+# list missed "<|eot_id|>" and would miss the next one too), and the inner name
+# is bounded to a bare identifier so a stray "<|" that happens to sit near a "|>"
+# in ordinary prose is not read as one.
 _INJECTION_MARKUP = re.compile(
     r"</?(?:system|instructions?|important|admin|developer)>"
+    r"|<</?SYS>>"
     r"|\[/?INST\]"
-    r"|<\|(?:im_start|im_end|system|user|assistant)\|>"
+    r"|<\|[\w-]{1,40}\|>"
     # A "## Instructions" heading is how people document a tool. Only a heading
     # that names the model's own context is a forged boundary.
     r"|(?:^|\n)[ \t]*#{1,6}[ \t]*(?:system|prompt)s?\b",

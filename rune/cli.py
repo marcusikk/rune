@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TextIO
 
+# DEFAULT_TIMEOUT only; the mcp SDK stays behind the lazy imports below.
+from .client import DEFAULT_TIMEOUT
 from .config import ConfigError, ServerSpec, load_config, select
 from .models import Severity, SourceStatus, ToolResult
 from .report import (
@@ -34,6 +37,30 @@ _VERSION = "0.1.0"
 _EXIT_CLEAN = 0
 _EXIT_FINDING = 1
 _EXIT_ERROR = 2
+
+
+def _timeout_seconds(value: str) -> float:
+    """Parse --timeout, refusing a budget no scan could ever finish inside.
+
+    Zero and negative expire before the handshake starts, so every server would
+    be reported as unresponsive. ``inf`` and ``nan`` are worse than useless:
+    asyncio builds a deadline out of the number, and neither one ever arrives,
+    so a scanner told to bound itself would instead wait for good in CI.
+    """
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number of seconds") from None
+    if not math.isfinite(seconds):
+        # Said separately because "not positive" is untrue of inf and says
+        # nothing about nan; the problem with both is that no wait ever ends.
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a length of time rune can wait; "
+            "give a positive number of seconds"
+        )
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a positive number of seconds")
+    return seconds
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -91,6 +118,15 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME:VALUE",
         help="send an extra HTTP header with --http or --sse, e.g. "
         "'Authorization: Bearer TOKEN'; repeatable",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_timeout_seconds,
+        default=None,
+        metavar="SECONDS",
+        help="how long one server gets to connect, handshake and return its "
+        f"listings (default: {DEFAULT_TIMEOUT:.0f}); with --config this is the "
+        "budget per server, not for the whole run",
     )
     parser.add_argument(
         "--fail-on",
@@ -551,7 +587,9 @@ def _redact(message: str, secrets: Iterable[str]) -> str:
     return message
 
 
-def _fetch_spec(spec: ServerSpec, err: TextIO) -> dict[str, list[dict[str, Any]]]:
+def _fetch_spec(
+    spec: ServerSpec, err: TextIO, timeout: float
+) -> dict[str, list[dict[str, Any]]]:
     """Open one config entry over its declared transport and list its metadata."""
     from .client import (
         LiveScanError,
@@ -562,7 +600,7 @@ def _fetch_spec(spec: ServerSpec, err: TextIO) -> dict[str, list[dict[str, Any]]
 
     if spec.transport == "stdio":
         return fetch_metadata(
-            spec.command, list(spec.args), env=spec.env or None, cwd=spec.cwd
+            spec.command, list(spec.args), env=spec.env or None, cwd=spec.cwd, timeout=timeout
         )
 
     try:
@@ -573,11 +611,11 @@ def _fetch_spec(spec: ServerSpec, err: TextIO) -> dict[str, list[dict[str, Any]]
     if warning:
         print(warning, file=err)
     fetch = fetch_metadata_sse if spec.transport == "sse" else fetch_metadata_http
-    return fetch(spec.url, headers=spec.headers or None)
+    return fetch(spec.url, headers=spec.headers or None, timeout=timeout)
 
 
 def _scan_specs(
-    specs: list[ServerSpec], err: TextIO
+    specs: list[ServerSpec], err: TextIO, timeout: float
 ) -> tuple[list[ToolResult], list[SourceStatus], list[tuple[str | None, _Groups]]]:
     """Scan each config entry in turn, collecting results and a per-server status.
 
@@ -590,6 +628,10 @@ def _scan_specs(
     it returned, which is what --pin and --write-pin digest. A server that was
     not scanned contributes no pair, so a pin never records metadata rune did not
     read.
+
+    ``timeout`` is each server's own budget rather than one for the whole run:
+    a config is scanned one server at a time, and a shared clock would make an
+    entry's result depend on how many entries happened to sit above it.
     """
     from .client import LiveScanError
 
@@ -608,7 +650,7 @@ def _scan_specs(
             f"rune: scanning {render_visible(spec.name)} ({spec.transport})", file=err
         )
         try:
-            groups = _fetch_spec(spec, err)
+            groups = _fetch_spec(spec, err, timeout)
         except LiveScanError as exc:
             secrets = (*spec.env.values(), *spec.headers.values())
             statuses.append(
@@ -669,6 +711,16 @@ def main(
     if args.server and not args.config:
         print("rune: --server only applies to --config", file=err)
         return _EXIT_ERROR
+
+    if args.timeout is not None and not (args.stdio or remote_url or args.config):
+        # A manifest is a file on disk. Accepting a budget for reading one would
+        # take a flag that changes nothing and report success for it.
+        print(
+            "rune: --timeout only applies to --stdio, --http, --sse or --config",
+            file=err,
+        )
+        return _EXIT_ERROR
+    timeout = DEFAULT_TIMEOUT if args.timeout is None else args.timeout
 
     headers: dict[str, str] = {}
     if remote_url:
@@ -738,7 +790,7 @@ def main(
             # printing "0 tool(s) scanned" and exiting 0 on an empty config.
             print(f"rune: {args.config} declares no MCP servers", file=err)
             return _EXIT_ERROR
-        results, statuses, listings = _scan_specs(specs, err)
+        results, statuses, listings = _scan_specs(specs, err, timeout)
         if (judging or writing) and not listings:
             # Both files describe metadata rune actually read. Writing one from a
             # scan that opened nothing would record an absence as a fact, and
@@ -776,7 +828,7 @@ def main(
                 from .client import LiveScanError, fetch_metadata
 
                 try:
-                    groups = fetch_metadata(args.stdio[0], list(args.stdio[1:]))
+                    groups = fetch_metadata(args.stdio[0], list(args.stdio[1:]), timeout=timeout)
                 except LiveScanError as exc:
                     print(f"rune: live scan failed: {exc}", file=err)
                     return _EXIT_ERROR
@@ -784,7 +836,7 @@ def main(
                 from .client import LiveScanError, fetch_metadata_http
 
                 try:
-                    groups = fetch_metadata_http(args.http, headers=headers)
+                    groups = fetch_metadata_http(args.http, headers=headers, timeout=timeout)
                 except LiveScanError as exc:
                     print(f"rune: live scan failed: {exc}", file=err)
                     return _EXIT_ERROR
@@ -792,7 +844,7 @@ def main(
                 from .client import LiveScanError, fetch_metadata_sse
 
                 try:
-                    groups = fetch_metadata_sse(args.sse, headers=headers)
+                    groups = fetch_metadata_sse(args.sse, headers=headers, timeout=timeout)
                 except LiveScanError as exc:
                     print(f"rune: live scan failed: {exc}", file=err)
                     return _EXIT_ERROR

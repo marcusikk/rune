@@ -31,13 +31,39 @@ class LiveScanError(RuntimeError):
     """Raised when the server cannot be reached or listed."""
 
 
+# How long one server gets to accept the connection, complete the handshake and
+# hand back all three listings. Enough for a server that is already installed,
+# and the CLI's --timeout is what covers the one that has to fetch itself first.
+DEFAULT_TIMEOUT = 20.0
+
+
+def _budget(timeout: float) -> str:
+    """Render a timeout budget for a message: 20s, and 0.5s when fractional.
+
+    ``%g`` rather than a fixed precision, because a budget printed back as the
+    "0s" a `.0f` makes of half a second reads as a rune bug rather than as the
+    number the user typed.
+    """
+    return f"{timeout:g}s"
+
+
+def _timed_out(timeout: float) -> LiveScanError:
+    """The one message every transport raises when its budget runs out.
+
+    It names the flag because the usual cause is not a broken server: a command
+    like ``npx -y some-mcp-server`` downloads the package on its first run, and
+    the fix is more time rather than a different config.
+    """
+    return LiveScanError(f"server did not respond within {_budget(timeout)} (see --timeout)")
+
+
 def fetch_metadata(
     command: str,
     args: list[str],
     *,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
-    timeout: float = 20.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, list[dict[str, Any]]]:
     """Spawn an MCP stdio server and list its tools, prompts and resources.
 
@@ -90,11 +116,11 @@ async def _fetch(
     try:
         return await asyncio.wait_for(run(), timeout=timeout)
     except asyncio.TimeoutError as exc:
-        raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
+        raise _timed_out(timeout) from exc
 
 
 def fetch_metadata_http(
-    url: str, *, headers: dict[str, str] | None = None, timeout: float = 20.0
+    url: str, *, headers: dict[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, list[dict[str, Any]]]:
     """List a remote Streamable HTTP MCP server's metadata over the real transport.
 
@@ -179,11 +205,11 @@ async def _fetch_http(
     try:
         return await asyncio.wait_for(run(), timeout=timeout)
     except asyncio.TimeoutError as exc:
-        raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
+        raise _timed_out(timeout) from exc
 
 
 def fetch_metadata_sse(
-    url: str, *, headers: dict[str, str] | None = None, timeout: float = 20.0
+    url: str, *, headers: dict[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, list[dict[str, Any]]]:
     """List a remote MCP server's metadata over the deprecated HTTP+SSE transport.
 
@@ -226,7 +252,7 @@ async def _fetch_sse(
     try:
         return await asyncio.wait_for(run(), timeout=timeout)
     except asyncio.TimeoutError as exc:
-        raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
+        raise _timed_out(timeout) from exc
 
 
 async def _collect(session: Any, mcp_error: type[Exception]) -> dict[str, list[dict[str, Any]]]:

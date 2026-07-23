@@ -59,6 +59,11 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
 - A config placeholder rune cannot resolve is that entry's own error, never an
   empty string: a guess would start a server the client does not start and
   report the scan of it as the audit of the real one. See `tests/test_config.py`.
+- Every live scan is bounded. `--timeout` is one server's own budget, never a
+  clock shared across a `--config` run, and a value that is zero, negative or
+  non-finite is refused at parse time: asyncio builds a deadline out of the
+  number, and `inf`/`nan` never arrive, so accepting either would turn a scanner
+  told to bound itself into one that hangs. See `tests/test_timeout.py`.
 - `--pin` and `--baseline` compare only the servers a run actually scanned. A
   server left out is named as unchecked, never reported as removed or stale:
   "rune did not look" is not "it is gone".

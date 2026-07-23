@@ -120,6 +120,10 @@ def test_injection_markup_positive(text: str) -> None:
         "Left-shifts the mask, e.g. 1 << 3, before the compare.",
         # an angle-bracket placeholder is not the <|...|> frame
         "Fetches <resource-id> from the store.",
+        # both delimiters appear but the span between them is prose, not a bare
+        # token name; this is what keeps the interior bound honest. If the bound
+        # were loosened from [\w-] to any character, this would flag.
+        "Use <| as the opening marker and |> as the closing one.",
     ],
 )
 def test_injection_markup_negative(text: str) -> None:

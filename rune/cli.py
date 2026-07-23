@@ -23,7 +23,7 @@ from .report import (
     render_text,
     render_unchecked_notice,
 )
-from .scan import render_visible, scan_targets
+from .scan import flag_name_collisions, render_visible, scan_targets
 
 if TYPE_CHECKING:
     from .baseline import BaselineEntry
@@ -859,6 +859,11 @@ def main(
 
         results = scan_targets(groups)
         listings = [(None, groups)]
+
+    # After both branches, and after every server in a --config run has been
+    # listed: a name two servers both answer to is only visible with all of them
+    # in hand, and neither listing is anomalous on its own.
+    flag_name_collisions(results)
 
     wrote_artifact = False
     if args.write_baseline:

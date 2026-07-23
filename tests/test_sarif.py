@@ -10,7 +10,7 @@ from rune.baseline import fingerprint
 from rune.cli import main
 from rune.models import Finding, Severity, ToolResult
 from rune.report import _RULE_INDEX, _SARIF_RULES, to_sarif
-from rune.rules import RULE_IDS
+from rune.rules import ALL_RULE_IDS
 
 
 def _run(argv: list[str], stdin: str | None = None) -> tuple[int, str, str]:
@@ -55,6 +55,7 @@ def test_sarif_envelope_is_well_formed(tmp_path: Path) -> None:
         "confusable-characters",
         "compatibility-characters",
         "injection-markup",
+        "name-collision",
         "sensitive-file-access",
     ]
 
@@ -230,14 +231,18 @@ def test_sarif_declares_every_rule_the_engine_can_emit() -> None:
     # through: it emitted a result with no ruleIndex and a ruleId absent from
     # driver.rules, and every test here stayed green. Deriving the expected set
     # from the engine rather than from the fixtures is what closes that hole.
+    # ALL_RULE_IDS, not RULE_IDS: a rule decided by comparing entities rather
+    # than by reading a string (name-collision) is reported through the same
+    # SARIF results and needs the same metadata, so the coverage guard has to
+    # cover it too or it is exactly the hole this test exists to close.
     declared = {rule_id for rule_id, _, _ in _SARIF_RULES}
-    assert declared == RULE_IDS, (
+    assert declared == ALL_RULE_IDS, (
         "driver.rules and the engine disagree: a rule was added to rules.py "
         "without SARIF metadata in _SARIF_RULES, or vice versa"
     )
     # ... and the index table covers the same set, since that is what decides
     # whether a result gets a ruleIndex at all.
-    assert set(_RULE_INDEX) == RULE_IDS
+    assert set(_RULE_INDEX) == ALL_RULE_IDS
 
 
 def test_unknown_rule_id_is_never_silently_indexed() -> None:

@@ -105,12 +105,19 @@ class ToolResult:
     reports and fingerprints exactly as it always has. When it is set it is part
     of the finding's identity: two servers in one config can each expose a tool
     named ``search``, and their findings are not the same finding.
+
+    ``route_name`` is the name a client would route a call by, set only for the
+    kinds that are routed by name and only when the entity actually declares one.
+    ``name`` above is the report label, which falls back to a title, a URI or a
+    positional placeholder, so comparing labels would make two unnamed entities
+    look like the same target. Kept apart for that reason.
     """
 
     name: str
     findings: list[Finding] = field(default_factory=list)
     kind: str = "tool"
     source: str | None = None
+    route_name: str | None = None
 
     @property
     def score(self) -> int:

@@ -20,7 +20,9 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
   `scan_targets` groups the kinds; each result carries its `kind`.
   `flag_name_collisions` is the one finding that reads no text: it runs once over
   the whole scan, after every server has been listed, and flags entities that
-  share the name a client routes calls by. Its rule id lives in
+  share the name a client routes calls by. It spans whatever one run covered: the
+  servers of a `--config` scan, or several captured manifests passed as repeated
+  `--manifest`, each stamped with its file as the source. Its rule id lives in
   `rules.STRUCTURAL_RULE_IDS`, so a consumer keying a table off rune's rules
   (the SARIF driver) covers `ALL_RULE_IDS`, not just `RULE_IDS`.
 - `rune/pin.py` - digests every string `scan.walk_strings` yields and diffs a

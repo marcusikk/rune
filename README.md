@@ -141,6 +141,19 @@ rune --stdio python my_server.py
 rune --stdio npx -y @vendor/some-mcp-server
 ```
 
+A server gets 20 seconds to accept the connection, finish the handshake and hand
+back its listings. That is generous for one already installed and not enough for
+the second line above the first time anyone runs it, because `npx -y` downloads
+the package before the server exists at all. `--timeout` is that budget:
+
+```
+rune --timeout 120 --stdio npx -y @vendor/some-mcp-server
+```
+
+Put it before `--stdio`, since everything after `--stdio` is the command to run.
+It takes any positive number of seconds, applies to `--http` and `--sse` too, and
+with `--config` it is what each server gets rather than one clock for the run.
+
 Scan a live remote server over Streamable HTTP, the transport hosted MCP servers
 speak. Point `--http` at the server's MCP endpoint, which usually ends in `/mcp`:
 
@@ -781,8 +794,9 @@ rune is a signal for human review, not a proof of safety.
   client would prompt for, are refused by name on that entry rather than guessed
   at. Everything else inside `${...}` is passed through as written, since rune
   cannot know what it means to the server about to read it, and a resolved value
-  is never resolved a second time. Each server gets the same 20-second budget a
-  single scan gets, so a large config takes as long as its slowest servers.
+  is never resolved a second time. Servers are opened one at a time, never in
+  parallel, and each gets its own `--timeout` budget rather than a share of one,
+  so a large config takes as long as the sum of its slowest servers.
 - Credentials rune reads out of a config are never printed. Env and header values
   are taken back out of any error message before it reaches a terminal or a CI
   log, and a URL is quoted back only with its userinfo and query string stripped.

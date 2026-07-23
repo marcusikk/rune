@@ -303,3 +303,25 @@ def test_a_baseline_written_from_a_config_suppresses_that_server(tmp_path: Path)
     assert code == 0
     assert "0 flagged" in out
     assert json.loads(baseline.read_text(encoding="utf-8"))["findings"][0]["source"] == "notes"
+
+
+def test_a_server_slower_than_its_budget_is_reported_and_can_be_given_longer(
+    tmp_path: Path,
+) -> None:
+    # The execution-based proof that --timeout is the number rune actually
+    # waits: one real server, stalled for two seconds, scanned twice. The first
+    # run cannot reach the handshake inside its budget and says so; the second
+    # gives it the time it needs and completes. Before the flag there was only
+    # the first outcome, with nothing a user could type to reach the second.
+    config = _config(
+        tmp_path, {"slow": _entry("slow_server.py", env={"RUNE_TEST_DELAY": "2"})}
+    )
+
+    code, out, _ = _run(["--config", config, "--timeout", "0.5"])
+    assert code == 2
+    assert "not scanned: server did not respond within 0.5s (see --timeout)" in out
+
+    code, out, _ = _run(["--config", config, "--timeout", "60"])
+    assert code == 0
+    assert "tool ping" in out
+    assert "1 of 1 server(s) in " in out

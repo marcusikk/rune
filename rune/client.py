@@ -23,6 +23,7 @@ manifest scanner works with no third-party packages installed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from typing import Any
 
@@ -31,13 +32,64 @@ class LiveScanError(RuntimeError):
     """Raised when the server cannot be reached or listed."""
 
 
+# How long one server gets to accept the connection, complete the handshake and
+# hand back all three listings. Enough for a server that is already installed,
+# and the CLI's --timeout is what covers the one that has to fetch itself first.
+DEFAULT_TIMEOUT = 20.0
+
+
+def _budget(timeout: float) -> str:
+    """Render a timeout budget for a message: 20s, and 0.5s when fractional.
+
+    ``%g`` rather than a fixed precision, because a budget printed back as the
+    "0s" a `.0f` makes of half a second reads as a rune bug rather than as the
+    number the user typed.
+    """
+    return f"{timeout:g}s"
+
+
+def _timed_out(timeout: float) -> LiveScanError:
+    """The one message every transport raises when its budget runs out.
+
+    It names the flag because the usual cause is not a broken server: a command
+    like ``npx -y some-mcp-server`` downloads the package on its first run, and
+    the fix is more time rather than a different config.
+    """
+    return LiveScanError(f"server did not respond within {_budget(timeout)} (see --timeout)")
+
+
+async def _run_within(coro: Any, timeout: float) -> Any:
+    """Run ``coro`` and turn "it did not finish in time" into ``_timed_out``.
+
+    ``asyncio.wait_for`` normally does this itself, by cancelling the coroutine
+    and catching the ``CancelledError`` that falls out of it. But the SDK's
+    transports run their own ``TaskGroup`` inside, and on a loaded runner the
+    cancellation can reach one of that group's own tasks mid I/O instead of
+    unwinding cleanly, which then raises something else entirely (a broken
+    pipe, wrapped as "unhandled errors in a TaskGroup") that ``wait_for`` has no
+    reason to treat as its own timeout, so it lets that wrapper text out
+    unconverted instead. Racing the coroutine against a plain sleep sidesteps
+    the guesswork: once the clock, and not the coroutine's own exception, is
+    what decided the outcome, whatever the cancelled task then raises while it
+    unwinds is expected teardown noise, not the story to tell the caller.
+    """
+    task = asyncio.ensure_future(coro)
+    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    if task not in done:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        raise _timed_out(timeout)
+    return task.result()
+
+
 def fetch_metadata(
     command: str,
     args: list[str],
     *,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
-    timeout: float = 20.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, list[dict[str, Any]]]:
     """Spawn an MCP stdio server and list its tools, prompts and resources.
 
@@ -87,14 +139,11 @@ async def _fetch(
                 async with ClientSession(read, write) as session:
                     return await _collect(session, McpError)
 
-    try:
-        return await asyncio.wait_for(run(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
+    return await _run_within(run(), timeout)
 
 
 def fetch_metadata_http(
-    url: str, *, headers: dict[str, str] | None = None, timeout: float = 20.0
+    url: str, *, headers: dict[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, list[dict[str, Any]]]:
     """List a remote Streamable HTTP MCP server's metadata over the real transport.
 
@@ -176,14 +225,11 @@ async def _fetch_http(
         ):
             return await _collect(session, McpError)
 
-    try:
-        return await asyncio.wait_for(run(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
+    return await _run_within(run(), timeout)
 
 
 def fetch_metadata_sse(
-    url: str, *, headers: dict[str, str] | None = None, timeout: float = 20.0
+    url: str, *, headers: dict[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, list[dict[str, Any]]]:
     """List a remote MCP server's metadata over the deprecated HTTP+SSE transport.
 
@@ -215,7 +261,7 @@ async def _fetch_sse(
     async def run() -> dict[str, list[dict[str, Any]]]:
         # sse_client yields (read, write); it holds a long-lived GET stream open
         # for server->client messages, so the connect timeout and the overall
-        # wait_for below are what bound a server that accepts the socket but never
+        # budget below are what bound a server that accepts the socket but never
         # sends its endpoint event.
         async with (
             sse_client(url, headers=headers or None, timeout=timeout) as (read, write),
@@ -223,10 +269,7 @@ async def _fetch_sse(
         ):
             return await _collect(session, McpError)
 
-    try:
-        return await asyncio.wait_for(run(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
+    return await _run_within(run(), timeout)
 
 
 async def _collect(session: Any, mcp_error: type[Exception]) -> dict[str, list[dict[str, Any]]]:

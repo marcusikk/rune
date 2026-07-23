@@ -67,7 +67,9 @@ def _serve(
     """
     from rune.client import LiveScanError
 
-    def fetch(spec: ServerSpec, err: object) -> dict[str, list[dict[str, object]]]:
+    def fetch(
+        spec: ServerSpec, err: object, timeout: float
+    ) -> dict[str, list[dict[str, object]]]:
         groups = listings.get(spec.name)
         if groups is None:
             raise LiveScanError("connection refused")
@@ -774,7 +776,9 @@ def test_a_resolved_credential_is_still_kept_out_of_a_message(
 
     monkeypatch.setenv("RUNE_TEST_TOKEN", "sk-live-abcdefghij")
 
-    def fetch(spec: ServerSpec, err: object) -> dict[str, list[dict[str, object]]]:
+    def fetch(
+        spec: ServerSpec, err: object, timeout: float
+    ) -> dict[str, list[dict[str, object]]]:
         raise LiveScanError(f"spawn failed with env {spec.env!r}")
 
     monkeypatch.setattr("rune.cli._fetch_spec", fetch)

@@ -1140,19 +1140,63 @@ def test_server_metadata_scanned_beside_listings(tmp_path: Path) -> None:
     assert "1 tool(s), 1 server(s) scanned" in _run([manifest])[1]
 
 
-def test_tools_list_with_cursor_makes_no_phantom_server(tmp_path: Path) -> None:
-    # A paginated tools/list response is {"tools": [...], "nextCursor": "..."}.
-    # nextCursor is not server metadata, so no server entity is invented and the
-    # clean listing still exits 0. This is the phantom-server regression guard.
-    manifest = _write(
-        tmp_path, {"tools": [_CLEAN_TOOL], "nextCursor": "eyJwYWdlIjogMn0="}
-    )
+def test_null_cursor_scans_and_makes_no_phantom_server(tmp_path: Path) -> None:
+    # A last page may spell "no more pages" as "nextCursor": null. That listing
+    # is complete, it scans, and nextCursor is not server metadata, so no server
+    # entity is invented. This is the phantom-server regression guard.
+    manifest = _write(tmp_path, {"tools": [_CLEAN_TOOL], "nextCursor": None})
     code, out, _ = _run([manifest, "--json"])
     assert code == 0
     payload = json.loads(out)
     assert payload["summary"]["servers"] == 0
     assert payload["servers"] == []
     assert "server" not in _run([manifest])[1]
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    ["eyJwYWdlIjogMn0=", "", 2],
+    ids=["opaque-token", "empty-string", "wrong-type"],
+)
+def test_reply_still_holding_a_cursor_is_refused(tmp_path: Path, cursor: object) -> None:
+    # {"tools": [...], "nextCursor": ...} is one page of a longer listing, and
+    # the page most worth poisoning is the one that was not captured. Scanning
+    # the page in hand and printing CLEAN would be the gate vouching for
+    # metadata it never read, so the file is an exit 2 naming the cursor and
+    # both ways out. "" is refused too: it is not null, so a client that checks
+    # "is not None" would send it back and get another page.
+    manifest = _write(tmp_path, {"tools": [_CLEAN_TOOL], "nextCursor": cursor})
+    code, out, err = _run([manifest])
+    assert code == 2
+    assert "nextCursor" in err
+    assert "paginated" in err
+    assert "--http" in err
+    assert "CLEAN" not in out
+
+
+def test_cursor_under_a_result_envelope_is_refused(tmp_path: Path) -> None:
+    # A raw JSON-RPC reply keeps the listing, cursor included, under "result".
+    # The unwrap must not out-run the truncation check.
+    manifest = _write(
+        tmp_path,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": [_CLEAN_TOOL], "nextCursor": "eyJwYWdlIjogMn0="},
+        },
+    )
+    code, _, err = _run([manifest])
+    assert code == 2
+    assert "nextCursor" in err
+
+
+def test_piped_page_with_a_cursor_is_refused_on_stdin(tmp_path: Path) -> None:
+    # The documented curl | rune - pipe is where a single captured page is most
+    # likely to come from, so the refusal has to hold there too.
+    payload = json.dumps({"tools": [_CLEAN_TOOL], "nextCursor": "abc"})
+    code, _, err = _run(["-"], stdin=payload)
+    assert code == 2
+    assert "nextCursor" in err
 
 
 def test_empty_server_fields_make_no_phantom_entity(tmp_path: Path) -> None:

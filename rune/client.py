@@ -10,7 +10,9 @@ All three transports (stdio, Streamable HTTP, and the deprecated HTTP+SSE) run
 the identical listing pass in ``_collect``, so a remote server is scanned exactly
 as deeply as a local stdio one: the handshake ``instructions`` and ``serverInfo``
 plus all three listings, not just the ``tools/list`` reply a hand-written curl
-would capture.
+would capture. Each listing is paginated by the protocol, and every page is
+fetched: a scan that stopped at the first ``nextCursor`` would let a server hide
+a poisoned tool on page two and still be told CLEAN.
 
 Prompts and resources are only listed when the server advertises them in its
 capabilities, and a server that advertises but fails to list them is treated as
@@ -55,7 +57,7 @@ def fetch_metadata(
     except LiveScanError:
         raise
     except Exception as exc:  # surfaced to the CLI as an operational error
-        raise LiveScanError(str(exc)) from exc
+        raise _own_refusal(exc) or LiveScanError(str(exc)) from exc
 
 
 async def _fetch(
@@ -107,7 +109,7 @@ def fetch_metadata_http(
     except LiveScanError:
         raise
     except Exception as exc:  # surfaced to the CLI as an operational error
-        raise LiveScanError(_http_reason(exc)) from exc
+        raise _own_refusal(exc) or LiveScanError(_http_reason(exc)) from exc
 
 
 def _leaves(exc: BaseException) -> list[BaseException]:
@@ -121,6 +123,21 @@ def _leaves(exc: BaseException) -> list[BaseException]:
     if not inner:
         return [exc]
     return [leaf for sub in inner for leaf in _leaves(sub)]
+
+
+def _own_refusal(exc: Exception) -> LiveScanError | None:
+    """Pull rune's own refusal back out of a task group's wrapper, if one is in it.
+
+    A refusal raised inside _collect (a pagination loop, a too-old SDK) crosses
+    the SDK's task-group teardown on its way out, and when a child task also
+    fails while unwinding, it arrives wrapped in an ExceptionGroup whose str()
+    is the useless "unhandled errors in a TaskGroup". The refusal is the error
+    that decided the outcome, so it is the one the user gets.
+    """
+    for leaf in _leaves(exc):
+        if isinstance(leaf, LiveScanError):
+            return leaf
+    return None
 
 
 def _http_reason(exc: Exception, *, path_hint: str = "/mcp") -> str:
@@ -153,7 +170,7 @@ async def _fetch_http(
     url: str, headers: dict[str, str], timeout: float
 ) -> dict[str, list[dict[str, Any]]]:
     # streamablehttp_client is the entry point that exists across the whole
-    # mcp>=1.0 range this package declares. Newer SDKs also expose
+    # mcp>=1.9 range this package declares. Newer SDKs also expose
     # streamable_http_client, which takes a caller-built httpx client instead of
     # headers/timeout; using it here would mean a second, untestable code path
     # for the older SDKs still in range, so rune stays on the compatible one.
@@ -198,7 +215,7 @@ def fetch_metadata_sse(
     except LiveScanError:
         raise
     except Exception as exc:  # surfaced to the CLI as an operational error
-        raise LiveScanError(_http_reason(exc, path_hint="/sse")) from exc
+        raise _own_refusal(exc) or LiveScanError(_http_reason(exc, path_hint="/sse")) from exc
 
 
 async def _fetch_sse(
@@ -229,11 +246,56 @@ async def _fetch_sse(
         raise LiveScanError(f"server did not respond within {timeout:.0f}s") from exc
 
 
+async def _list_all(method: Any, field: str, what: str) -> list[Any]:
+    """Follow one listing's pagination to its last page and return every item.
+
+    The MCP listing calls are paginated: a server may answer with one page and a
+    ``nextCursor`` naming the next, and a client is expected to keep asking. A
+    scanner that reads only the first page hands an attacker the easiest evasion
+    there is, a poisoned tool parked on page two, so every cursor is followed
+    until a page arrives without one.
+
+    A cursor rune has already sent back means the server is walking the listing
+    in a circle. That is refused by name rather than ridden until the timeout,
+    and the cursor's value is server-supplied text, so the message does not
+    quote it. A server inventing endless distinct cursors is bounded by the
+    overall scan timeout like any other stall.
+    """
+    items: list[Any] = []
+    seen: set[str] = set()
+    result = await method()
+    while True:
+        items.extend(getattr(result, field))
+        cursor = result.nextCursor
+        if cursor is None:
+            return items
+        if cursor in seen:
+            raise LiveScanError(
+                f"server's {what} listing repeats a pagination cursor instead "
+                "of ending; refusing to follow it in a circle"
+            )
+        seen.add(cursor)
+        try:
+            call = method(cursor=cursor)
+        except TypeError as exc:
+            # An SDK older than 1.9 has no cursor parameter. Left alone this
+            # surfaces as "unexpected keyword argument", which blames rune's
+            # code for what is a version gap with a one-line fix.
+            raise LiveScanError(
+                f"this server pages its {what} listing, and following the "
+                "cursor needs mcp>=1.9: pip install -U mcp"
+            ) from exc
+        result = await call
+
+
 async def _collect(session: Any, mcp_error: type[Exception]) -> dict[str, list[dict[str, Any]]]:
     """Run the handshake and list every metadata surface on an open session.
 
     Shared by both transports so neither can drift into scanning less than the
     other. ``mcp_error`` is passed in because the SDK is imported lazily.
+
+    Every listing is fetched through :func:`_list_all`, so a paginated server is
+    scanned to its last page before anything is judged.
     """
     init = await session.initialize()
     caps = init.capabilities
@@ -249,26 +311,29 @@ async def _collect(session: Any, mcp_error: type[Exception]) -> dict[str, list[d
     if entity:
         server = [entity]
 
-    tools = [t.model_dump(mode="json") for t in (await session.list_tools()).tools]
+    listed_tools = await _list_all(session.list_tools, "tools", "tools")
+    tools = [t.model_dump(mode="json") for t in listed_tools]
 
     prompts: list[dict[str, Any]] = []
     if caps.prompts is not None:
         try:
-            listed = await session.list_prompts()
-            prompts = [p.model_dump(mode="json") for p in listed.prompts]
+            listed = await _list_all(session.list_prompts, "prompts", "prompts")
+            prompts = [p.model_dump(mode="json") for p in listed]
         except mcp_error:
             prompts = []
 
     resources: list[dict[str, Any]] = []
     if caps.resources is not None:
         try:
-            r_listed = await session.list_resources()
-            resources = [r.model_dump(mode="json") for r in r_listed.resources]
+            r_listed = await _list_all(session.list_resources, "resources", "resources")
+            resources = [r.model_dump(mode="json") for r in r_listed]
         except mcp_error:
             resources = []
         try:
-            t_listed = await session.list_resource_templates()
-            resources += [t.model_dump(mode="json") for t in t_listed.resourceTemplates]
+            t_listed = await _list_all(
+                session.list_resource_templates, "resourceTemplates", "resource templates"
+            )
+            resources += [t.model_dump(mode="json") for t in t_listed]
         except mcp_error:
             pass
 

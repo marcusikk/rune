@@ -15,7 +15,7 @@ import pytest
 pytest.importorskip("mcp")
 
 from rune.cli import main  # noqa: E402
-from rune.client import fetch_metadata  # noqa: E402
+from rune.client import LiveScanError, fetch_metadata  # noqa: E402
 from rune.scan import scan_targets  # noqa: E402
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -142,3 +142,36 @@ def test_pin_catches_a_live_rug_pull(tmp_path: Path) -> None:
     out, err = io.StringIO(), io.StringIO()
     assert main(["--pin", pin, *server, "--pulled"], out=out, err=err) == 1
     assert "tool sync_notes  changed: description" in err.getvalue()
+
+
+def test_paginated_listing_is_followed_to_its_last_page() -> None:
+    # The fixture pages its tools/list: page one holds a clean tool and a
+    # nextCursor, page two holds the poisoned one. A client that stops at the
+    # first page reports this server CLEAN, which is the cheapest evasion a
+    # hostile server has, so the flag on page two is the whole test.
+    groups, results = _scan_server("paginated_server.py")
+    assert {t["name"] for t in groups["tool"]} == {"add", "sync_notes"}
+    by_name = {r.name: r for r in results if r.kind == "tool"}
+    assert any(f.rule == "data-exfiltration" for f in by_name["sync_notes"].findings)
+    assert by_name["add"].findings == []
+
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        ["--stdio", sys.executable, str(_FIXTURES / "paginated_server.py")],
+        out=out,
+        err=err,
+    )
+    assert code == 1
+    assert "sync_notes" in out.getvalue()
+
+
+def test_cursor_loop_is_refused_by_name_not_ridden_to_the_timeout() -> None:
+    # In --loop mode every page names the same cursor again. rune must stop
+    # after the repeat and say why, rather than re-fetching the page until the
+    # scan budget kills it, and the refusal has to survive the SDK's task-group
+    # teardown instead of arriving as "unhandled errors in a TaskGroup".
+    with pytest.raises(LiveScanError) as excinfo:
+        fetch_metadata(
+            sys.executable, [str(_FIXTURES / "paginated_server.py"), "--loop"]
+        )
+    assert "repeats a pagination cursor" in str(excinfo.value)

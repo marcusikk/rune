@@ -22,8 +22,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-live = ["mcp>=1.0"]
-dev = ["pytest>=7", "ruff>=0.5", "bandit>=1.7", "mcp>=1.0"]
+# mcp 1.9 is where ClientSession's listing calls grew their cursor parameter;
+# without it a paginated listing cannot be followed past its first page.
+live = ["mcp>=1.9"]
+dev = ["pytest>=7", "ruff>=0.5", "bandit>=1.7", "mcp>=1.9"]
 
 [project.scripts]
 rune = "rune.cli:main"

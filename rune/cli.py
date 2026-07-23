@@ -354,7 +354,21 @@ def _envelope_groups(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     here: it is read only from the object handed to _normalize, so a raw
     JSON-RPC initialize reply with those fields hidden under "result" is still a
     named error rather than a silent miss.
+
+    A "nextCursor" that carries a value is refused at every level. The listing
+    calls are paginated, and a reply still holding a cursor is one page of a
+    longer listing: the entities on the pages after it are exactly as
+    model-facing as the ones in the file, and scanning what was captured would
+    report CLEAN over metadata rune never saw. null is fine, since that is how
+    some servers spell "no more pages".
     """
+    if data.get("nextCursor") is not None:
+        raise ValueError(
+            '"nextCursor" is set, so this is one page of a paginated listing '
+            "and the pages after it were not captured; point --stdio, --http "
+            "or --sse at the server and rune will follow the cursor itself, or "
+            "capture the listing through to its last page"
+        )
     groups = _listing_groups(data)
     inner = data.get("result")
     if isinstance(inner, dict):
@@ -370,9 +384,11 @@ def _server_entity(data: dict[str, Any]) -> dict[str, Any] | None:
     Scopes to exactly the two fields a client reads, ``instructions`` (a string
     the spec says MAY be added to the system prompt) and ``serverInfo`` (the
     display name and title). Every other key in the response is left alone, so a
-    benign ``protocolVersion`` or a ``nextCursor`` on a listing is never mistaken
-    for server metadata. Widening this to "any key that is not a listing" is what
-    turns an honest response into a false finding, so the set stays closed.
+    benign ``protocolVersion`` is never mistaken for server metadata (a
+    ``nextCursor`` holding a value never gets this far: _envelope_groups refuses
+    the truncated capture first). Widening this to "any key that is not a
+    listing" is what turns an honest response into a false finding, so the set
+    stays closed.
 
     A field that is present but the wrong type is an error naming the key, never
     a skip. Dropping it would scan whatever else the file holds and print CLEAN

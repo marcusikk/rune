@@ -119,13 +119,26 @@ name and title). They are reported as a `server` entity beside any listings.
 }
 ```
 
-Every other key in the response is left alone, so a `protocolVersion` or the
-`nextCursor` on a paginated listing is never mistaken for server metadata and
-never invents a finding. Either field may be absent, and an empty `instructions`
-string or empty `serverInfo` is reported as no server at all rather than as a
-scanned entity holding nothing. If one is present but the wrong type, that is an
-exit `2` naming the field, on the same rule as a malformed listing: rune will not
-scan around metadata it could not read and call the result CLEAN.
+Every other key in the response is left alone, so a `protocolVersion` is never
+mistaken for server metadata and never invents a finding. Either field may be
+absent, and an empty `instructions` string or empty `serverInfo` is reported as
+no server at all rather than as a scanned entity holding nothing. If one is
+present but the wrong type, that is an exit `2` naming the field, on the same
+rule as a malformed listing: rune will not scan around metadata it could not
+read and call the result CLEAN.
+
+One shape of captured reply is refused outright: a listing that still carries a
+`nextCursor` value. The listing calls are paginated, so that reply is one page
+of a longer listing, and the page most worth poisoning is the one you did not
+capture. Scanning the page in hand and printing CLEAN would be rune vouching
+for metadata it never read, so it exits `2` instead and tells you to either
+capture the listing through to its last page or point `--stdio`, `--http` or
+`--sse` at the server, where rune follows the cursor itself. A
+`"nextCursor": null` on a final page is fine, since it carries no page to miss.
+When rune connects live it fetches every page before judging anything, and a
+server that answers a cursor with the same cursor again is reported as a
+refusal by name rather than followed in a circle until the scan budget kills
+it.
 
 Unlike a tool, prompt, or resource listing, server metadata is read only from
 the top-level object, not unwrapped from a `result` envelope: a raw JSON-RPC
@@ -763,12 +776,15 @@ rune is a signal for human review, not a proof of safety.
   older two-endpoint HTTP+SSE transport (`--sse`), plus saved manifests,
   including the raw JSON-RPC `tools/list` reply an HTTP server returns, whether
   that reply is a JSON body or a `text/event-stream` (it reads the SSE `data:`
-  frames). For a transport rune does not open itself, capture the `tools/list`
-  (and `prompts/list`, `resources/list`) reply and scan it, or pipe it in with
-  `-`, remembering that a captured reply cannot carry the handshake
-  `instructions`. `--config` scans a whole MCP client config by opening each
-  server it declares over that server's own transport, so every entry gets the
-  same scan it would get on its own.
+  frames). A live scan follows a paginated listing to its last page, so a tool
+  parked behind a `nextCursor` gets the same scan as one on page one; a captured
+  reply that still carries a cursor is refused as incomplete rather than scanned
+  as though it were the whole listing. For a transport rune does not open
+  itself, capture the `tools/list` (and `prompts/list`, `resources/list`) reply
+  and scan it, or pipe it in with `-`, remembering that a captured reply cannot
+  carry the handshake `instructions`. `--config` scans a whole MCP client config
+  by opening each server it declares over that server's own transport, so every
+  entry gets the same scan it would get on its own.
 - `--config` reads JSONC, the JSON with comments and trailing commas that VS Code
   writes and documents, so the file you already have is the file rune scans. That
   applies to `--config` only: a manifest is a protocol payload, not something you

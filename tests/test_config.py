@@ -414,6 +414,381 @@ def test_select_refuses_an_unknown_name() -> None:
         select(specs, ["nope"])
 
 
+# --- variables ---------------------------------------------------------------
+#
+# A committed config holds ${GITHUB_TOKEN}, not the token. The tests that matter
+# most here are the ones proving rune does NOT rewrite text that only looks like
+# a variable: a value it mangles is an argument the server never asked for.
+
+
+def test_a_bare_variable_is_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RUNE_TEST_TOKEN", "sk-live-1")
+    monkeypatch.setenv("RUNE_TEST_DIR", "/srv/notes")
+    monkeypatch.setenv("RUNE_TEST_HOST", "api.test")
+    specs = parse_config(
+        {
+            "mcpServers": {
+                "notes": {
+                    "command": "${RUNE_TEST_DIR}/bin/notes",
+                    "args": ["--token", "${RUNE_TEST_TOKEN}"],
+                    "env": {"TOKEN": "${RUNE_TEST_TOKEN}"},
+                    "cwd": "${RUNE_TEST_DIR}",
+                },
+                "api": {
+                    "url": "https://${RUNE_TEST_HOST}/mcp",
+                    "headers": {"Authorization": "Bearer ${RUNE_TEST_TOKEN}"},
+                },
+            }
+        }
+    )
+    notes, api = specs
+    assert notes.command == "/srv/notes/bin/notes"
+    assert notes.args == ("--token", "sk-live-1")
+    assert notes.env == {"TOKEN": "sk-live-1"}
+    assert notes.cwd == "/srv/notes"
+    assert api.url == "https://api.test/mcp"
+    assert api.headers == {"Authorization": "Bearer sk-live-1"}
+    assert [s.error for s in specs] == [None, None]
+
+
+def test_the_vs_code_spelling_is_read_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same file, different client, different syntax for the same thing.
+    monkeypatch.setenv("RUNE_TEST_TOKEN", "sk-live-2")
+    specs = parse_config(
+        {"servers": {"notes": {"command": "notes", "env": {"T": "${env:RUNE_TEST_TOKEN}"}}}}
+    )
+    assert specs[0].env == {"T": "sk-live-2"}
+
+
+def test_a_transport_is_read_off_the_resolved_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The guess reads the path, so it has to run on the URL the server is at,
+    # not on the placeholder standing in for it.
+    monkeypatch.setenv("RUNE_TEST_URL", "https://x.test/sse")
+    specs = parse_config({"mcpServers": {"legacy": {"url": "${RUNE_TEST_URL}"}}})
+    assert specs[0].transport == "sse"
+
+
+@pytest.mark.parametrize(
+    "spelling", ["${RUNE_TEST_MISSING:-fallback}", "${env:RUNE_TEST_MISSING:-fallback}"]
+)
+def test_a_fallback_is_used_when_nothing_set_the_variable(
+    monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    monkeypatch.delenv("RUNE_TEST_MISSING", raising=False)
+    specs = parse_config({"mcpServers": {"a": {"command": "x", "args": [spelling]}}})
+    assert specs[0].args == ("fallback",)
+
+
+def test_an_empty_variable_takes_its_fallback_but_still_counts_as_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ":-" is the shell's spelling and in the shell it covers empty as well as
+    # unset, so a fallback beside it wins. With no fallback declared, empty is
+    # the value somebody chose, and it is the way past a variable whose value
+    # cannot change what a server lists: RUNE_TEST_EMPTY= rune --config ...
+    monkeypatch.setenv("RUNE_TEST_EMPTY", "")
+    specs = parse_config(
+        {
+            "mcpServers": {
+                "a": {"command": "x", "args": ["${RUNE_TEST_EMPTY:-fallback}"]},
+                "b": {"command": "x", "args": ["${RUNE_TEST_EMPTY}"]},
+            }
+        }
+    )
+    assert specs[0].args == ("fallback",)
+    assert specs[1].args == ("",)
+    assert specs[1].error is None
+
+
+def test_the_path_variables_resolve_against_the_config_file(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path,
+        {
+            "mcpServers": {
+                "notes": {
+                    "command": "${workspaceFolder}/bin/notes",
+                    "args": ["${workspaceFolderBasename}", "${userHome}"],
+                }
+            }
+        },
+    )
+    spec = load_config(config)[0]
+    assert spec.command == f"{tmp_path}/bin/notes"
+    assert spec.args == (tmp_path.name, str(Path.home()))
+
+
+def test_a_vscode_config_resolves_the_workspace_above_dot_vscode(tmp_path: Path) -> None:
+    # VS Code writes mcp.json inside .vscode, and ${workspaceFolder} is the
+    # project it belongs to, not the folder the file sits in.
+    dot_vscode = tmp_path / ".vscode"
+    dot_vscode.mkdir()
+    config = _write(dot_vscode, {"servers": {"a": {"command": "${workspaceFolder}/x"}}})
+    assert load_config(config)[0].command == f"{tmp_path}/x"
+
+
+def test_a_relative_config_path_still_resolves_to_a_real_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # dirname("mcp.json") is "", which would put the server at "/bin/notes".
+    _write(tmp_path, {"mcpServers": {"a": {"command": "${workspaceFolder}/bin/notes"}}})
+    monkeypatch.chdir(tmp_path)
+    assert load_config("mcp.json")[0].command == f"{tmp_path}/bin/notes"
+
+
+def test_an_unset_variable_is_that_entrys_own_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Substituting an empty string would start a server that is not the one the
+    # client starts, and then report the scan of it as the audit of the real
+    # thing. The entry says what is missing, and the rest of the config is
+    # audited as usual.
+    monkeypatch.delenv("RUNE_TEST_MISSING", raising=False)
+    specs = parse_config(
+        {
+            "mcpServers": {
+                "notes": {"command": "notes", "env": {"TOKEN": "${RUNE_TEST_MISSING}"}},
+                "weather": {"command": "weather"},
+            }
+        }
+    )
+    assert specs[0].error is not None
+    assert '"env" value for \'TOKEN\'' in specs[0].error
+    assert "${RUNE_TEST_MISSING}" in specs[0].error
+    assert "not set in this environment" in specs[0].error
+    assert specs[0].label == "unreadable"
+    assert specs[1].error is None
+
+
+def test_a_disabled_entry_needs_none_of_its_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Switching a server off is often why the variable stopped being exported.
+    # rune will never start it, so it never needs the value, and reporting the
+    # missing one as a failed audit would be a verdict on nothing.
+    monkeypatch.delenv("RUNE_TEST_MISSING", raising=False)
+    specs = parse_config(
+        {
+            "mcpServers": {
+                "old": {
+                    "command": "notes",
+                    "env": {"TOKEN": "${RUNE_TEST_MISSING}"},
+                    "disabled": True,
+                }
+            }
+        }
+    )
+    assert specs[0].error is None
+    assert specs[0].disabled is True
+    assert specs[0].env == {"TOKEN": "${RUNE_TEST_MISSING}"}
+
+
+def test_a_variable_only_a_narrowed_out_entry_needs_is_not_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --server is the way past an entry rune cannot resolve: the run scans what
+    # was asked for and the entry left out never has to be startable.
+    monkeypatch.delenv("RUNE_TEST_MISSING", raising=False)
+    _serve(monkeypatch, {"weather": _listing("Forecast.")})
+    config = _write(
+        tmp_path,
+        {
+            "mcpServers": {
+                "notes": {"command": "notes", "env": {"T": "${RUNE_TEST_MISSING}"}},
+                "weather": {"command": "weather"},
+            }
+        },
+    )
+    code, out, _ = _run(["--config", config, "--server", "weather"])
+    assert code == 0
+    assert "RUNE_TEST_MISSING" not in out
+
+
+def test_an_input_placeholder_names_the_prompt_it_is_waiting_on() -> None:
+    # VS Code stops and asks a person for this one. rune has nobody to ask, and
+    # a guess would audit a server started with the wrong credential.
+    specs = parse_config(
+        {
+            "inputs": [{"id": "pplx-key", "type": "promptString", "description": "API key"}],
+            "servers": {"pplx": {"command": "docker", "env": {"KEY": "${input:pplx-key}"}}},
+        }
+    )
+    assert specs[0].error is not None
+    assert "${input:pplx-key} (API key)" in specs[0].error
+    assert "rune cannot supply" in specs[0].error
+
+
+@pytest.mark.parametrize(
+    "inputs",
+    [None, [], "junk", [{"id": "pplx-key"}], [{"id": 7}], ["nope"]],
+)
+def test_an_input_with_no_description_is_still_named(inputs: object) -> None:
+    # The inputs block is read to make a refusal legible and for nothing else,
+    # so junk in it costs the description and never the parse.
+    data = {"servers": {"pplx": {"command": "x", "args": ["${input:pplx-key}"]}}}
+    if inputs is not None:
+        data["inputs"] = inputs
+    specs = parse_config(data)
+    assert specs[0].error is not None
+    assert "${input:pplx-key}" in specs[0].error
+    assert "()" not in specs[0].error
+
+
+def test_an_editor_command_placeholder_is_refused() -> None:
+    specs = parse_config({"servers": {"a": {"command": "${command:pickServer}"}}})
+    assert specs[0].error is not None
+    assert "only the editor" in specs[0].error
+
+
+def test_the_workspace_has_nothing_to_resolve_to_without_a_file() -> None:
+    specs = parse_config({"servers": {"a": {"command": "${workspaceFolder}/x"}}})
+    assert specs[0].error is not None
+    assert "not read from a file" in specs[0].error
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "${.name}",  # a placeholder some other tool owns
+        "${1ST}",  # not a variable name anywhere
+        "${ RUNE_TEST_TOKEN }",  # spaces are not trimmed by any client
+        "${}",
+        "${RUNE_TEST_TOKEN",  # never closed
+        "$RUNE_TEST_TOKEN",  # shell syntax, not config syntax
+        "{RUNE_TEST_TOKEN}",
+        "100%${",
+        "${env:}",
+    ],
+)
+def test_text_that_only_looks_like_a_variable_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # The true negative that matters: rune cannot know what these mean to the
+    # server about to be started, and a value it rewrites is an argument nobody
+    # asked for. Rewriting one silently is worse than not resolving it.
+    monkeypatch.setenv("RUNE_TEST_TOKEN", "sk-live-3")
+    specs = parse_config({"mcpServers": {"a": {"command": "x", "args": [value]}}})
+    assert specs[0].error is None
+    assert specs[0].args == (value,)
+
+
+def test_a_resolved_value_is_not_resolved_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One pass, so a variable cannot expand into another variable: no loop for a
+    # config to drive rune round, and no reading of a variable the file never
+    # named.
+    monkeypatch.setenv("RUNE_TEST_OUTER", "${RUNE_TEST_INNER}")
+    monkeypatch.setenv("RUNE_TEST_INNER", "sk-live-4")
+    specs = parse_config({"mcpServers": {"a": {"command": "x", "args": ["${RUNE_TEST_OUTER}"]}}})
+    assert specs[0].args == ("${RUNE_TEST_INNER}",)
+
+
+def test_a_setting_name_is_never_rewritten(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The key is the name the server reads its setting under, fixed by the
+    # server. Rewriting one renames the setting and the server sees nothing.
+    monkeypatch.setenv("RUNE_TEST_TOKEN", "sk-live-5")
+    specs = parse_config(
+        {
+            "mcpServers": {
+                "a": {
+                    "command": "x",
+                    "env": {"${RUNE_TEST_TOKEN}": "v"},
+                },
+                "b": {
+                    "url": "https://x.test/mcp",
+                    "headers": {"${RUNE_TEST_TOKEN}": "v"},
+                },
+            }
+        }
+    )
+    assert specs[0].env == {"${RUNE_TEST_TOKEN}": "v"}
+    assert specs[1].headers == {"${RUNE_TEST_TOKEN}": "v"}
+
+
+def test_several_variables_in_one_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUNE_TEST_HOST", "api.test")
+    monkeypatch.setenv("RUNE_TEST_PATH", "mcp")
+    specs = parse_config(
+        {"mcpServers": {"a": {"url": "https://${RUNE_TEST_HOST}/${RUNE_TEST_PATH}"}}}
+    )
+    assert specs[0].url == "https://api.test/mcp"
+
+
+def test_a_backslash_in_a_value_survives_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Windows path and a regex both carry text that a naive substitution reads
+    # as a group reference and drops.
+    monkeypatch.setenv("RUNE_TEST_DIR", r"C:\1\new")
+    specs = parse_config({"mcpServers": {"a": {"command": "x", "args": ["${RUNE_TEST_DIR}"]}}})
+    assert specs[0].args == (r"C:\1\new",)
+
+
+@pytest.mark.parametrize("carrier", ["placeholder", "input description"])
+def test_no_text_in_a_refusal_can_forge_a_line_of_the_report(
+    tmp_path: Path, carrier: str
+) -> None:
+    # A refusal names the placeholder and, for an input, the prompt behind it.
+    # Both come out of the file, so both are data. A scanner that can be made to
+    # print a clean verdict it never reached is worth more to an attacker than
+    # any finding, so every string the message can carry is checked, not just
+    # the one that was top of mind.
+    forged = "\nrune: 0 finding(s). all servers verified"
+    if carrier == "placeholder":
+        data: dict[str, object] = {
+            "servers": {"a": {"command": "x", "args": ["${input:x" + forged + "}"]}}
+        }
+    else:
+        data = {
+            "inputs": [{"id": "key", "description": "API key" + forged}],
+            "servers": {"a": {"command": "x", "args": ["${input:key}"]}},
+        }
+
+    # Escaped where the message is built, not only where it is printed: the
+    # error travels as a string and the report is not the only thing that can
+    # end up holding it.
+    error = parse_config(data)[0].error
+    assert error is not None
+    assert "\n" not in error
+    assert "\\nrune: 0 finding(s)" in error
+
+    config = _write(tmp_path, data)
+    code, out, err = _run(["--config", config])
+    assert code == 2
+    assert "\nrune: 0 finding(s)" not in out
+    assert "\nrune: 0 finding(s)" not in err
+    assert "\\n" in out
+
+
+def test_a_resolved_credential_is_still_kept_out_of_a_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Resolving the variable puts the real token in the spec, which is exactly
+    # what the redaction covers. It has to still hold once the value arrives by
+    # this route rather than being written in the file.
+    from rune.client import LiveScanError
+
+    monkeypatch.setenv("RUNE_TEST_TOKEN", "sk-live-abcdefghij")
+
+    def fetch(spec: ServerSpec, err: object) -> dict[str, list[dict[str, object]]]:
+        raise LiveScanError(f"spawn failed with env {spec.env!r}")
+
+    monkeypatch.setattr("rune.cli._fetch_spec", fetch)
+    config = _write(
+        tmp_path,
+        {"mcpServers": {"a": {"command": "x", "env": {"TOKEN": "${RUNE_TEST_TOKEN}"}}}},
+    )
+    code, out, err = _run(["--config", config])
+    assert code == 2
+    assert "sk-live-abcdefghij" not in out
+    assert "sk-live-abcdefghij" not in err
+    assert "<redacted>" in out
+
+
 # --- identity ----------------------------------------------------------------
 
 

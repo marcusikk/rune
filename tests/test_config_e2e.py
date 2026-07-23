@@ -145,6 +145,71 @@ def test_env_and_cwd_from_the_config_reach_the_server(tmp_path: Path) -> None:
     assert _run(["--config", changed_cwd, "--pin", str(pin)])[0] == 1
 
 
+def test_a_placeholder_in_the_config_reaches_the_server_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A committed config does not hold the token, it holds ${GITHUB_TOKEN}, and
+    # a VS Code entry points at ${workspaceFolder}. The proof that rune resolves
+    # them is not that the file parses, it is that the process starts with the
+    # values in it: env_server.py builds its tool description out of the
+    # environment variable and working directory it was actually given, so a pin
+    # taken from literal values matches a scan driven by placeholders only if
+    # both resolved to exactly those values.
+    pin = tmp_path / "context.pin.json"
+    literal = _config(
+        tmp_path,
+        {"context": _entry("env_server.py", env={"RUNE_MARKER": "carried"}, cwd=str(tmp_path))},
+        name="literal.json",
+    )
+    assert _run(["--config", literal, "--write-pin", str(pin)])[0] == 0
+
+    placeholders = _config(
+        tmp_path,
+        {
+            "context": _entry(
+                "env_server.py",
+                env={"RUNE_MARKER": "${RUNE_E2E_MARKER}"},
+                cwd="${workspaceFolder}",
+            )
+        },
+        name="placeholders.json",
+    )
+    monkeypatch.setenv("RUNE_E2E_MARKER", "carried")
+    code, out, _ = _run(["--config", placeholders, "--pin", str(pin)])
+    assert code == 0
+    assert "1 of 1 server(s) in " in out
+
+    # Control: the pin is sensitive to that marker, so the run above passing was
+    # the resolved value arriving and not the pin ignoring it.
+    monkeypatch.setenv("RUNE_E2E_MARKER", "different")
+    code, _, err = _run(["--config", placeholders, "--pin", str(pin)])
+    assert code == 1
+    assert "no longer match the pin" in err
+
+
+def test_an_unresolvable_placeholder_costs_one_entry_not_the_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The variable nobody exported is one entry's problem, named on stderr, and
+    # the servers beside it are audited as usual.
+    monkeypatch.delenv("RUNE_E2E_MISSING", raising=False)
+    config = _config(
+        tmp_path,
+        {
+            "notes": _entry("poisoned_server.py", env={"TOKEN": "${RUNE_E2E_MISSING}"}),
+            "weather": _entry("clean_server.py"),
+        },
+    )
+    code, out, err = _run(["--config", config])
+
+    assert code == 2
+    assert "=== notes (unreadable) ===" in out
+    assert "${RUNE_E2E_MISSING}" in out
+    assert "not set in this environment" in err
+    assert "tool get_weather" in out
+    assert "1 of 2 server(s) in " in out
+
+
 def test_a_pin_gates_one_server_picked_out_of_a_config(tmp_path: Path) -> None:
     # The rug pull, gated straight from the config the client already has: pin
     # the server as reviewed, then catch it serving different words later.

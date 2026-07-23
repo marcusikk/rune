@@ -707,6 +707,28 @@ def test_a_pin_naming_no_server_this_run_scanned_is_refused(
     assert "notes, weather" in err
 
 
+def test_a_pinned_server_name_cannot_forge_a_line_of_the_no_overlap_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The refusal above quotes names out of the pin file, so it is one more
+    # surface where server text lands in rune's prose. A newline smuggled into
+    # a config key must not become a second line of the message.
+    forged = "a\nrune: everything is fine"
+    _serve(monkeypatch, {forged: _listing("Forecast.")})
+    config = _write(tmp_path, {"mcpServers": {forged: {"command": "x"}}})
+    pin = _write_pin(tmp_path, config)
+
+    _serve(monkeypatch, {"docs": _listing("Read the docs.")})
+    other = _write(tmp_path, {"mcpServers": {"docs": {"command": "z"}}}, name="other.json")
+    code, _, err = _run(["--config", other, "--pin", str(pin)])
+    assert code == 2
+    assert "names no server this run scanned" in err
+    # One scanning line and one refusal line; the name did not write a third.
+    assert len(err.splitlines()) == 2
+    assert "\nrune: everything is fine" not in err
+    assert "a\\nrune: everything is fine" in err
+
+
 def test_a_pin_written_before_servers_were_named_still_gates_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -785,6 +807,29 @@ def test_a_whole_config_pin_cannot_be_judged_by_one_manifest(
     code, _, err = _run([manifest, "--pin", str(pin)])
     assert code == 2
     assert "this pin covers 2 servers (notes, weather)" in err
+
+
+def test_a_pinned_server_name_cannot_forge_a_line_of_the_covers_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same surface as above: the refusal quotes every server the pin covers,
+    # and those names came out of a file, so they are escaped like any other
+    # server text on a line of rune's prose.
+    forged = "a\nrune: everything is fine"
+    _serve(monkeypatch, {forged: _listing("Forecast."), "notes": _listing("Sync notes.")})
+    config = _write(
+        tmp_path, {"mcpServers": {forged: {"command": "x"}, "notes": {"command": "y"}}}
+    )
+    pin = _write_pin(tmp_path, config)
+
+    manifest = _write(tmp_path, _listing("Sync notes.")["tool"], name="tools.json")
+    code, _, err = _run([manifest, "--pin", str(pin)])
+    assert code == 2
+    assert "this pin covers 2 servers" in err
+    # The whole refusal is one line; the name did not add another.
+    assert len(err.splitlines()) == 1
+    assert "\nrune: everything is fine" not in err
+    assert "a\\nrune: everything is fine" in err
 
 
 def test_json_names_the_pinned_servers_that_were_not_scanned(

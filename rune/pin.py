@@ -52,7 +52,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .scan import KINDS, entity_label, walk_strings
+from .scan import KINDS, entity_label, render_visible, walk_strings
 
 # Bump when the digest inputs change in a way that invalidates existing files.
 # Recording the server a --config run read an entity from did NOT: the key is
@@ -292,7 +292,15 @@ def _grouped(entities: Sequence[PinnedEntity]) -> dict[_Key, list[PinnedEntity]]
 
 
 def _display(source: str | None) -> str:
-    """How a server name is written in a message about the pin file itself."""
+    """How a server name is written in a message about the pin file itself.
+
+    The name is returned exactly as the pin recorded it: the unchecked list is
+    a data surface (--json carries it as pinUnchecked), so it keeps the text the
+    server was configured under. A message built for a human has to escape it
+    with render_visible instead, because a PinError's text is printed as a line
+    of rune's own prose and a newline in a name would let the pin file write
+    lines of the report.
+    """
     return "(no server recorded)" if source is None else source
 
 
@@ -324,9 +332,9 @@ def scope_pin(
         # and the comparison is the one it has always been, unless the file
         # describes more than one server, which this run cannot be.
         if len(sources) > 1:
+            named = ", ".join(sorted(render_visible(_display(s)) for s in sources))
             raise PinError(
-                f"this pin covers {len(sources)} servers "
-                f"({', '.join(sorted(_display(s) for s in sources))}); "
+                f"this pin covers {len(sources)} servers ({named}); "
                 "judge it with --config, adding --server NAME to pick one out of it"
             )
         return [replace(e, source=None) for e in pinned], []
@@ -344,9 +352,11 @@ def scope_pin(
     comparable = [e for e in pinned if e.source in covered]
     unchecked = sorted(_display(s) for s in sources if s not in covered)
     if not comparable:
+        # Escaped here rather than in unchecked itself: the message is prose,
+        # the returned list is data and keeps the exact names.
         raise PinError(
             "this pin names no server this run scanned; it covers "
-            + ", ".join(unchecked)
+            + ", ".join(render_visible(n) for n in unchecked)
         )
     return comparable, unchecked
 

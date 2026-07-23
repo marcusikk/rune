@@ -37,7 +37,10 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
   then fills in the `${...}` placeholders the client would fill in, one pass so
   a resolved value is never resolved again.
 - `rune/report.py` - text, JSON and SARIF rendering.
-- `rune/client.py` - live stdio scan via the MCP SDK (lazy import).
+- `rune/client.py` - live scans via the MCP SDK (lazy import), over stdio,
+  Streamable HTTP and HTTP+SSE. `_OriginLock` is the one piece that is not
+  listing: it rides along as an httpx request hook and keeps a remote scan's
+  headers on the origin the URL named.
 - `rune/cli.py` - `main(argv, out, err)`, driven in-process by the tests.
 
 ## Invariants (do not break)
@@ -57,6 +60,13 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
 - A credential rune was handed is never printed: header values, config `env`
   values, and a URL's userinfo and query string are kept out of every error
   message and every artifact. See `tests/test_config.py`.
+- A credential rune was handed never leaves the origin of the URL it was given
+  for. The endpoint being audited is the untrusted party, so a redirect off that
+  origin is followed without the headers and ends the scan naming where it was
+  going, rather than reporting another server's metadata as that endpoint's.
+  Same scheme, host and port, plus the plain-to-TLS upgrade of one host, is
+  httpx's own rule for `Authorization` applied to every header. See
+  `tests/test_origin_lock.py` and `tests/test_redirect_e2e.py`.
 - A finding's identity is `(source, kind, entity name, rule, JSON path, matched
   text)`. `source` is set only on a `--config` scan and left out of the digest
   otherwise, so every baseline written before it keeps working.

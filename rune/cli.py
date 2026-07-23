@@ -5,17 +5,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TextIO
 
-from .models import Severity
+from .config import ConfigError, ServerSpec, load_config, select
+from .models import Severity, SourceStatus, ToolResult
 from .report import (
+    render_config_text,
     render_drift_notice,
     render_json,
     render_sarif,
+    render_source_notice,
     render_stale_notice,
     render_text,
 )
-from .scan import scan_targets
+from .scan import render_visible, scan_targets
 
 if TYPE_CHECKING:
     from .baseline import BaselineEntry
@@ -62,6 +66,19 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="URL",
         help="scan a live MCP server over the deprecated HTTP+SSE transport "
         "at URL (often ends in /sse)",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        help="scan every MCP server declared in an MCP client config file "
+        "(an \"mcpServers\" or \"servers\" map), one after another",
+    )
+    parser.add_argument(
+        "--server",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="with --config, scan only the named server; repeatable",
     )
     parser.add_argument(
         "--header",
@@ -455,14 +472,20 @@ def _check_http_url(url: str, opt: str) -> None:
     parts = urlsplit(url)
     if parts.scheme in ("http", "https"):
         if not parts.hostname:
-            raise ValueError(f"{opt} URL has no host: {url!r}")
+            raise ValueError(f"{opt} URL has no host: {_public_url(url)!r}")
         return
     if parts.netloc:
         # A real URL naming a transport rune cannot audit, e.g. ftp://host/x.
         raise ValueError(f"{opt} only speaks http and https, got {parts.scheme!r}")
     # No authority to speak to. Covers a bare "example.com/mcp", a bare path,
     # and "file:///etc/passwd", which urlsplit reads as a scheme with no host.
-    raise ValueError(f"{opt} needs an http:// or https:// URL, got {url!r}")
+    if parts.scheme:
+        raise ValueError(f"{opt} needs an http:// or https:// URL, got {_public_url(url)!r}")
+    # With no scheme at all, urlsplit reads the whole string as a path, so there
+    # is no authority to take userinfo out of and rune cannot tell a host from a
+    # credential inside it. It quotes none of it back rather than guessing: a URL
+    # out of a --config entry is exactly where a token gets embedded.
+    raise ValueError(f"{opt} needs an http:// or https:// URL")
 
 
 def _cleartext_warning(url: str, headers: dict[str, str]) -> str | None:
@@ -484,11 +507,13 @@ def _cleartext_warning(url: str, headers: dict[str, str]) -> str | None:
     )
 
 
-def _sarif_uri(url: str) -> str:
-    """The --http URL with anything secret stripped, for the SARIF artifact URI.
+def _public_url(url: str) -> str:
+    """The URL with anything secret stripped: no userinfo, no query string.
 
-    A SARIF log is uploaded and kept, so a token that rode in the query string
-    or in userinfo must not be written into it alongside the findings.
+    Used wherever a URL rune was handed gets written down. A SARIF log is
+    uploaded and kept, so a token that rode in the query string or in userinfo
+    must not land in it beside the findings, and an error message is read off a
+    terminal or out of a CI log, which is no better a place for one.
     """
     from urllib.parse import urlsplit, urlunsplit
 
@@ -497,6 +522,102 @@ def _sarif_uri(url: str) -> str:
     if parts.port:
         host = f"{host}:{parts.port}"
     return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+# The shortest config value rune will blank out of an error message. Below this
+# a "secret" is noise like "1" or "true", and blanking it would shred an
+# unrelated message; at or above it, anything is more plausibly a credential than
+# a coincidence.
+_SECRET_MIN = 8
+
+
+def _redact(message: str, secrets: Iterable[str]) -> str:
+    """Blank values rune read out of a config back out of a message it prints.
+
+    A config's env values and headers are where the API keys live, and the
+    failure a scan is most likely to hit is a server that dies on startup. The
+    error that comes back is built by somebody else's code (the SDK, the OS, an
+    HTTP library) so rune cannot promise by construction that nothing it was
+    handed is quoted inside it. What it can do is take its own inputs back out
+    before the message reaches a terminal or a CI log. Longest first, so a value
+    that contains another is not left half-blanked.
+    """
+    for secret in sorted({s for s in secrets if len(s) >= _SECRET_MIN}, key=len, reverse=True):
+        message = message.replace(secret, "<redacted>")
+    return message
+
+
+def _fetch_spec(spec: ServerSpec, err: TextIO) -> dict[str, list[dict[str, Any]]]:
+    """Open one config entry over its declared transport and list its metadata."""
+    from .client import (
+        LiveScanError,
+        fetch_metadata,
+        fetch_metadata_http,
+        fetch_metadata_sse,
+    )
+
+    if spec.transport == "stdio":
+        return fetch_metadata(
+            spec.command, list(spec.args), env=spec.env or None, cwd=spec.cwd
+        )
+
+    try:
+        _check_http_url(spec.url, "url")
+    except ValueError as exc:
+        raise LiveScanError(str(exc)) from exc
+    warning = _cleartext_warning(spec.url, spec.headers)
+    if warning:
+        print(warning, file=err)
+    fetch = fetch_metadata_sse if spec.transport == "sse" else fetch_metadata_http
+    return fetch(spec.url, headers=spec.headers or None)
+
+
+def _scan_specs(
+    specs: list[ServerSpec], err: TextIO
+) -> tuple[list[ToolResult], list[SourceStatus], dict[str, list[dict[str, Any]]] | None]:
+    """Scan each config entry in turn, collecting results and a per-server status.
+
+    One server's failure is that server's failure. A server that will not start
+    is recorded and the run moves on, because the alternative, stopping the whole
+    audit on the first broken entry, means the entry nobody has fixed keeps every
+    other server in the config from ever being looked at.
+
+    The third return value is the raw listing of the single scanned server, which
+    is what --pin and --write-pin need. It is None whenever the run did not
+    produce exactly one server's worth of metadata, and the caller has already
+    refused those flags in that case.
+    """
+    from .client import LiveScanError
+
+    results: list[ToolResult] = []
+    statuses: list[SourceStatus] = []
+    only_groups: dict[str, list[dict[str, Any]]] | None = None
+
+    for spec in specs:
+        if spec.error is not None:
+            statuses.append(SourceStatus(spec.name, spec.label, "failed", spec.error))
+            continue
+        if spec.disabled:
+            statuses.append(SourceStatus(spec.name, spec.label, "disabled"))
+            continue
+        print(
+            f"rune: scanning {render_visible(spec.name)} ({spec.transport})", file=err
+        )
+        try:
+            groups = _fetch_spec(spec, err)
+        except LiveScanError as exc:
+            secrets = (*spec.env.values(), *spec.headers.values())
+            statuses.append(
+                SourceStatus(spec.name, spec.label, "failed", _redact(str(exc), secrets))
+            )
+            continue
+        statuses.append(SourceStatus(spec.name, spec.label, "scanned"))
+        results.extend(scan_targets(groups, source=spec.name))
+        only_groups = groups
+
+    if sum(1 for s in statuses if s.ok) != 1:
+        only_groups = None
+    return results, statuses, only_groups
 
 
 def _want_color(args: argparse.Namespace, out: TextIO) -> bool:
@@ -524,17 +645,27 @@ def main(
     # validation, header, cleartext-warning and SARIF-URI handling.
     remote_url = args.http or args.sse
     remote_opt = "--http" if args.http else "--sse"
-    sources = [bool(manifest), bool(args.stdio), bool(args.http), bool(args.sse)]
-    if sum(sources) != 1:
+    given = [
+        bool(manifest), bool(args.stdio), bool(args.http), bool(args.sse), bool(args.config)
+    ]
+    if sum(given) != 1:
         print(
             "rune: give exactly one of a manifest path, --stdio CMD, --http URL, "
-            "or --sse URL",
+            "--sse URL, or --config FILE",
             file=err,
         )
         return _EXIT_ERROR
 
     if args.header and not remote_url:
+        # --header belongs to a URL given on the command line. A config carries
+        # each server's own headers, so one typed alongside it has no single
+        # server to belong to, and spreading it over every remote entry would
+        # send one server's credential to another.
         print("rune: --header only applies to --http or --sse", file=err)
+        return _EXIT_ERROR
+
+    if args.server and not args.config:
+        print("rune: --server only applies to --config", file=err)
         return _EXIT_ERROR
 
     headers: dict[str, str] = {}
@@ -582,41 +713,90 @@ def main(
         print("rune: use --json or --sarif, not both", file=err)
         return _EXIT_ERROR
 
-    try:
-        if args.stdio:
-            from .client import LiveScanError, fetch_metadata
+    statuses: list[SourceStatus] = []
+    if args.config:
+        try:
+            specs = load_config(args.config)
+        except FileNotFoundError:
+            print(f"rune: no such config: {args.config}", file=err)
+            return _EXIT_ERROR
+        except (ConfigError, OSError) as exc:
+            print(f"rune: cannot read config: {exc}", file=err)
+            return _EXIT_ERROR
+        try:
+            specs = select(specs, args.server)
+        except ConfigError as exc:
+            print(f"rune: {exc}", file=err)
+            return _EXIT_ERROR
+        if not specs:
+            # An audit that opened nothing is not a clean audit. Saying so beats
+            # printing "0 tool(s) scanned" and exiting 0 on an empty config.
+            print(f"rune: {args.config} declares no MCP servers", file=err)
+            return _EXIT_ERROR
+        # A baseline and a pin are both statements about one server's metadata,
+        # keyed on the entity names inside it. Across several servers there is no
+        # one thing for either file to describe, so the run is narrowed with
+        # --server rather than the files quietly being made ambiguous.
+        if len(specs) != 1 and (judging or writing):
+            print(
+                f"rune: {(judging + writing)[0]} covers one server; add --server "
+                "NAME to pick which one out of the config",
+                file=err,
+            )
+            return _EXIT_ERROR
+        results, statuses, groups = _scan_specs(specs, err)
+        if groups is None:
+            # Nothing to pin: either no server was scanned or more than one was,
+            # and the latter has already been refused above.
+            groups = {}
+        if (judging or writing) and not all(s.ok for s in statuses):
+            # Both files describe metadata rune actually read. Writing one from a
+            # server that never answered would record an absence as a fact, and
+            # judging against one would report every pinned entity as removed and
+            # every approved finding as stale. Neither is a verdict rune has.
+            print(render_source_notice(statuses), file=err)
+            print(
+                f"rune: {(judging + writing)[0]} needs metadata from the server; "
+                "nothing was read",
+                file=err,
+            )
+            return _EXIT_ERROR
+    else:
+        try:
+            if args.stdio:
+                from .client import LiveScanError, fetch_metadata
 
-            try:
-                groups = fetch_metadata(args.stdio[0], list(args.stdio[1:]))
-            except LiveScanError as exc:
-                print(f"rune: live scan failed: {exc}", file=err)
-                return _EXIT_ERROR
-        elif args.http:
-            from .client import LiveScanError, fetch_metadata_http
+                try:
+                    groups = fetch_metadata(args.stdio[0], list(args.stdio[1:]))
+                except LiveScanError as exc:
+                    print(f"rune: live scan failed: {exc}", file=err)
+                    return _EXIT_ERROR
+            elif args.http:
+                from .client import LiveScanError, fetch_metadata_http
 
-            try:
-                groups = fetch_metadata_http(args.http, headers=headers)
-            except LiveScanError as exc:
-                print(f"rune: live scan failed: {exc}", file=err)
-                return _EXIT_ERROR
-        elif args.sse:
-            from .client import LiveScanError, fetch_metadata_sse
+                try:
+                    groups = fetch_metadata_http(args.http, headers=headers)
+                except LiveScanError as exc:
+                    print(f"rune: live scan failed: {exc}", file=err)
+                    return _EXIT_ERROR
+            elif args.sse:
+                from .client import LiveScanError, fetch_metadata_sse
 
-            try:
-                groups = fetch_metadata_sse(args.sse, headers=headers)
-            except LiveScanError as exc:
-                print(f"rune: live scan failed: {exc}", file=err)
-                return _EXIT_ERROR
-        else:
-            groups = _load_manifest(manifest, inp)
-    except FileNotFoundError:
-        print(f"rune: no such file: {manifest}", file=err)
-        return _EXIT_ERROR
-    except (json.JSONDecodeError, ValueError, OSError) as exc:
-        print(f"rune: cannot read manifest: {exc}", file=err)
-        return _EXIT_ERROR
+                try:
+                    groups = fetch_metadata_sse(args.sse, headers=headers)
+                except LiveScanError as exc:
+                    print(f"rune: live scan failed: {exc}", file=err)
+                    return _EXIT_ERROR
+            else:
+                groups = _load_manifest(manifest, inp)
+        except FileNotFoundError:
+            print(f"rune: no such file: {manifest}", file=err)
+            return _EXIT_ERROR
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            print(f"rune: cannot read manifest: {exc}", file=err)
+            return _EXIT_ERROR
 
-    results = scan_targets(groups)
+        results = scan_targets(groups)
 
     wrote_artifact = False
     if args.write_baseline:
@@ -705,12 +885,35 @@ def main(
         # artifact URI is only set when a real manifest path was read, or when
         # --http/--sse gave a genuine URI to name (credentials stripped out of it).
         if remote_url:
-            source_uri = _sarif_uri(remote_url)
+            source_uri = _public_url(remote_url)
+        elif args.config:
+            # Every finding in a config scan traces back to this one file, which
+            # is what a platform should anchor the alerts to.
+            source_uri = args.config
         else:
             source_uri = manifest if manifest and manifest != _STDIN_ARG else None
-        print(render_sarif(results, uri=source_uri, version=_VERSION), file=out)
+        print(
+            render_sarif(results, uri=source_uri, version=_VERSION, sources=statuses),
+            file=out,
+        )
     elif args.json:
-        print(render_json(results, baselined=baselined, stale=stale, drifts=drifts), file=out)
+        print(
+            render_json(
+                results, baselined=baselined, stale=stale, drifts=drifts, sources=statuses
+            ),
+            file=out,
+        )
+    elif statuses:
+        print(
+            render_config_text(
+                results,
+                statuses,
+                args.config,
+                color=_want_color(args, out),
+                baselined=baselined,
+            ),
+            file=out,
+        )
     else:
         print(render_text(results, color=_want_color(args, out), baselined=baselined), file=out)
 
@@ -721,6 +924,16 @@ def main(
         print(render_stale_notice(stale), file=err)
     if drifts:
         print(render_drift_notice(drifts), file=err)
+    if any(not s.ok for s in statuses):
+        print(render_source_notice(statuses), file=err)
+
+    # A server that would not answer means the audit is not finished, so the
+    # incomplete run reports the operational error even when it also found
+    # something. Exit 1 there would state a complete verdict rune does not have.
+    # A server the config itself switched off is not a failure: it is not wired
+    # into an agent either, so leaving it unscanned is the correct scan.
+    if any(s.status == "failed" for s in statuses):
+        return _EXIT_ERROR
 
     threshold = Severity.from_label(args.fail_on)
     hit = any(f.severity >= threshold for r in results for f in r.findings)

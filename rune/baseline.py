@@ -50,7 +50,9 @@ class BaselineError(ValueError):
     """Raised when a baseline file cannot be parsed."""
 
 
-def fingerprint(name: str, finding: Finding, *, kind: str = "tool") -> str:
+def fingerprint(
+    name: str, finding: Finding, *, kind: str = "tool", source: str | None = None
+) -> str:
     """A stable id for one finding, independent of where it sits in the string.
 
     Built from the entity name, the rule, the JSON path, and the matched text.
@@ -70,31 +72,52 @@ def fingerprint(name: str, finding: Finding, *, kind: str = "tool") -> str:
     --sarif, which fingerprints every result, raising on input the rest of rune
     handles. surrogatepass changes no digest of text that already encoded, so
     every baseline on disk stays valid and _FORMAT_VERSION does not move.
+
+    ``source`` is the config's name for the server the result came from, set only
+    on a ``--config`` scan. It is folded in when present for the reason ``kind``
+    is: two servers in one config can each expose a tool named ``search``, and an
+    approval given to one of them must not silently cover the other. It is left
+    out entirely when absent, which is every scan of a single server, so no
+    fingerprint any existing baseline recorded moves and _FORMAT_VERSION stays 1.
     """
     parts = (name, finding.rule, finding.path, finding.match)
     if kind != "tool":
         parts = (kind, *parts)
+    if source is not None:
+        parts = (source, *parts)
     joined = "\x00".join(parts)
     return hashlib.sha256(joined.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+def _entry(r: ToolResult, f: Finding) -> dict[str, Any]:
+    entry = {
+        "kind": r.kind,
+        "target": r.name,
+        "rule": f.rule,
+        "path": f.path,
+        "fingerprint": fingerprint(r.name, f, kind=r.kind, source=r.source),
+        "excerpt": f.excerpt,
+    }
+    # Written only on a --config scan, so a baseline from any other run keeps the
+    # exact keys it has always had and re-writing one produces no diff.
+    if r.source is not None:
+        entry["source"] = r.source
+    return entry
+
+
 def build_baseline(results: list[ToolResult]) -> dict[str, Any]:
     """Serialize every current finding into a reviewable baseline document."""
-    entries = [
-        {
-            "kind": r.kind,
-            "target": r.name,
-            "rule": f.rule,
-            "path": f.path,
-            "fingerprint": fingerprint(r.name, f, kind=r.kind),
-            "excerpt": f.excerpt,
-        }
-        for r in results
-        for f in r.findings
-    ]
+    entries = [_entry(r, f) for r in results for f in r.findings]
     # Sort so the file is stable across runs and diffs cleanly in version control.
     entries.sort(
-        key=lambda e: (e["kind"], e["target"], e["rule"], e["path"], e["fingerprint"])
+        key=lambda e: (
+            e.get("source", ""),
+            e["kind"],
+            e["target"],
+            e["rule"],
+            e["path"],
+            e["fingerprint"],
+        )
     )
     return {"version": _FORMAT_VERSION, "findings": entries}
 
@@ -115,6 +138,7 @@ class BaselineEntry:
     target: str = ""
     rule: str = ""
     path: str = ""
+    source: str = ""
 
     @property
     def label(self) -> str:
@@ -128,7 +152,11 @@ class BaselineEntry:
         if not (self.kind or self.target or self.rule):
             return f"fingerprint {self.fingerprint[:12]}"
         located = f"{self.kind} {self.target}  {self.rule}".strip()
-        return f"{located}  {self.path}" if self.path else located
+        if self.path:
+            located = f"{located}  {self.path}"
+        # A --config baseline can hold two entries that differ only by which
+        # server they came from, so an entry that recorded one names it.
+        return f"{self.source}: {located}" if self.source else located
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -136,6 +164,7 @@ class BaselineEntry:
             "target": self.target,
             "rule": self.rule,
             "path": self.path,
+            "source": self.source,
             "fingerprint": self.fingerprint,
         }
 
@@ -183,6 +212,7 @@ def load_baseline(path: str) -> list[BaselineEntry]:
                 target=_text(entry, "target"),
                 rule=_text(entry, "rule"),
                 path=_text(entry, "path"),
+                source=_text(entry, "source"),
             )
         )
     return entries
@@ -196,7 +226,9 @@ def current_fingerprints(results: list[ToolResult]) -> set[str]:
     entry look like it matched nothing, which is the precise opposite of stale.
     """
     return {
-        fingerprint(r.name, f, kind=r.kind) for r in results for f in r.findings
+        fingerprint(r.name, f, kind=r.kind, source=r.source)
+        for r in results
+        for f in r.findings
     }
 
 
@@ -229,7 +261,7 @@ def apply_baseline(results: list[ToolResult], accepted: set[str]) -> int:
     for r in results:
         kept: list[Finding] = []
         for f in r.findings:
-            if fingerprint(r.name, f, kind=r.kind) in accepted:
+            if fingerprint(r.name, f, kind=r.kind, source=r.source) in accepted:
                 suppressed += 1
             else:
                 kept.append(f)

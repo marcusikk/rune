@@ -32,15 +32,26 @@ class LiveScanError(RuntimeError):
 
 
 def fetch_metadata(
-    command: str, args: list[str], *, timeout: float = 20.0
+    command: str,
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    timeout: float = 20.0,
 ) -> dict[str, list[dict[str, Any]]]:
     """Spawn an MCP stdio server and list its tools, prompts and resources.
 
     Returns a dict keyed by kind (``tool``/``prompt``/``resource``) so the same
     scanner path handles a live server and a saved manifest.
+
+    ``env`` and ``cwd`` are what an MCP client config records beside the command,
+    and a server that needs them does not start without them. ``env`` is layered
+    over the SDK's safe default environment rather than replacing it, which is
+    how a client applies it: an entry naming one API key must not also strip the
+    PATH the command is found on.
     """
     try:
-        return asyncio.run(_fetch(command, args, timeout))
+        return asyncio.run(_fetch(command, args, env, cwd, timeout))
     except LiveScanError:
         raise
     except Exception as exc:  # surfaced to the CLI as an operational error
@@ -48,7 +59,11 @@ def fetch_metadata(
 
 
 async def _fetch(
-    command: str, args: list[str], timeout: float
+    command: str,
+    args: list[str],
+    env: dict[str, str] | None,
+    cwd: str | None,
+    timeout: float,
 ) -> dict[str, list[dict[str, Any]]]:
     try:
         from mcp import ClientSession, McpError, StdioServerParameters
@@ -61,7 +76,8 @@ async def _fetch(
     params = StdioServerParameters(
         command=command,
         args=args,
-        env=get_default_environment(),
+        env={**get_default_environment(), **(env or {})},
+        cwd=cwd,
     )
 
     async def run() -> dict[str, list[dict[str, Any]]]:

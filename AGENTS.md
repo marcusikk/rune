@@ -20,7 +20,10 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
 - `rune/pin.py` - digests every string `scan.walk_strings` yields and diffs a
   scan against a recorded pin. Detection by change, not by pattern, so it is the
   one part of rune that is not a rule and emits no finding.
-- `rune/report.py` - text and JSON rendering.
+- `rune/config.py` - parses an MCP client config (`mcpServers`/`servers`) into
+  `ServerSpec`s. Never connects; a bad entry records its own `error` instead of
+  raising, so one broken entry cannot cancel the audit of the rest.
+- `rune/report.py` - text, JSON and SARIF rendering.
 - `rune/client.py` - live stdio scan via the MCP SDK (lazy import).
 - `rune/cli.py` - `main(argv, out, err)`, driven in-process by the tests.
 
@@ -38,6 +41,12 @@ lists only: it never calls a tool, renders a prompt, or reads a resource body.
   `tests/test_report_safety.py`.
 - The `data-exfiltration` rule keys on the secret being the grammatical object
   of an outbound verb, never on word order. See `tests/test_precision.py`.
+- A credential rune was handed is never printed: header values, config `env`
+  values, and a URL's userinfo and query string are kept out of every error
+  message and every artifact. See `tests/test_config.py`.
+- A finding's identity is `(source, kind, entity name, rule, JSON path, matched
+  text)`. `source` is set only on a `--config` scan and left out of the digest
+  otherwise, so every baseline written before it keeps working.
 
 ## Checks
 

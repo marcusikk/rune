@@ -1202,13 +1202,26 @@ _READ_VERB_RE = re.compile(r"\b" + _READ_VERB + r"\b", _FLAGS)
 # list: matching "any dotfile" or "any *.pem" would fire on ordinary config, and
 # ".env" is left out because it is common in honest dev-tool docs (and is already
 # a secret the exfil rule covers when it is actually sent somewhere).
+#
+# The last block is the credential stores of the CLIs an agent's shell reaches
+# for: cloud and git-forge tools that cache a live OAuth or API token on disk.
+# Azure sits beside the AWS and gcloud files above so the big-three cloud CLIs
+# are covered symmetrically; the GitHub and GitLab CLIs sit beside the older
+# .git-credentials; a HashiCorp Vault token and a Terraform Cloud token are two
+# more secrets an agent host commonly holds. A leaf that is generic on its own
+# (hosts.yml, config.yml) is matched only under its tool's directory, so an
+# Ansible hosts.yml or an application config.yml stays clean, the same closed-set
+# discipline the rest of the list follows.
 _SENSITIVE_FILE = (
     r"(?:"
     r"\.ssh/id_[a-z0-9]+"
     r"|id_rsa|id_dsa|id_ecdsa|id_ed25519"
     r"|\.aws/credentials"
     r"|\.config/gcloud|application_default_credentials\.json"
+    r"|\.azure/(?:accessTokens|msal_token_cache)\.json"
     r"|\.netrc|\.pgpass|\.npmrc|\.pypirc|\.git-credentials"
+    r"|\.config/gh/hosts\.yml|\.config/glab-cli/config\.yml"
+    r"|\.vault-token|\.terraform\.d/credentials\.tfrc\.json"
     r"|\.docker/config\.json|\.kube/config"
     r"|/etc/(?:passwd|shadow)"
     r"|\.cursor/mcp\.json|claude_desktop_config\.json"

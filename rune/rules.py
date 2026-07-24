@@ -594,10 +594,34 @@ _EXFIL_VERB = (
 
 # Real network TLDs. A bare word.suffix is only a destination when the suffix is
 # one of these, so backup.json / config.yaml / id_rsa.pem are never domains.
+#
+# The list is a closed allowlist on purpose: it is the precision lever that tells
+# a scheme-less destination ("post the API key to collector.top") from a filename
+# ("write the API key to backup.json"). Every entry earns its place by being a
+# suffix a collector is plausibly reached at while NOT being a common file
+# extension, because the second the two overlap the bare-domain branch starts
+# reading local filenames as external destinations.
+#
+# The abused-gTLD block below is what a collector actually registers under today.
+# .top is the most-abused paid gTLD by volume, and .icu / .cyou / .sbs / .rest /
+# .quest / .buzz / .monster / .cfd / .bond / .vip / .wang / .fun / .work / .world
+# / .life / .live are the cheap-registration gTLDs that dominate the same spam and
+# malware abuse tables as the .xyz and Freenom (.tk/.ml/.ga/.cf/.gq) entries that
+# were already here. Before this an exfil instruction pointed at any of them read
+# CLEAN: the attacker just picked collector.top and the whole rule went silent.
+#
+# .zip and .mov are deliberately NOT here even though both are live gTLDs, because
+# each doubles as an everyday file extension ("write the key to backup.zip",
+# "save the recording to clip.mov"). Adding them would flag a local write to an
+# archive or a video as an external send, the exact filename-as-domain confusion
+# this allowlist exists to prevent, so they stay out until a local-write guard can
+# tell backup.zip the file from backup.zip the host.
 _TLDS = (
     "com|net|org|io|dev|app|co|ai|cloud|xyz|info|biz|me|us|uk|de|fr|nl|eu|ru"
     "|cn|jp|in|br|au|ca|sh|so|to|ly|gg|tv|cc|pro|site|online|store|tech|link"
     "|click|host|space|tk|ml|ga|cf|gq"
+    "|top|icu|cyou|sbs|rest|quest|buzz|monster|cfd|bond|vip|wang|fun|work"
+    "|world|life|live"
 )
 
 # A dotted-quad IPv4 literal. A URL with an IP host is already a destination via

@@ -597,32 +597,44 @@ _EXFIL_VERB = (
 #
 # The list is a closed allowlist on purpose: it is the precision lever that tells
 # a scheme-less destination ("post the API key to collector.icu") from a filename
-# ("write the API key to backup.json"). Every entry has to be a suffix a collector
-# is plausibly reached at without also reading as ordinary developer text, because
-# the second the two overlap the bare-domain branch starts flagging local
-# filenames and code identifiers as external destinations.
+# ("write the API key to backup.json"). A suffix earns a place only when it is a
+# coined string, not an English word, a code attribute name, a personal name, or
+# a file extension, so word.<suffix> can only be a hostname. The moment a suffix
+# also reads as ordinary developer text the bare-domain branch starts flagging
+# local filenames and identifiers as external destinations.
 #
 # The abused-gTLD block below extends the cheap-registration coverage past the old
-# .xyz and Freenom (.tk/.ml/.ga/.cf/.gq) entries. .icu / .cyou / .sbs / .wang sit
+# .xyz and Freenom (.tk/.ml/.ga/.cf/.gq) entries. .icu / .cyou / .sbs / .cfd sit
 # high on the same spam and malware abuse tables, and before this an exfil
-# instruction pointed at one read CLEAN just because the suffix was missing:
-# the attacker registered collector.icu and the whole rule went silent.
+# instruction pointed at one read CLEAN just because the suffix was missing: the
+# attacker registered collector.icu and the whole rule went silent. All four are
+# coined strings that clear the criterion above.
 #
-# These four are coined strings, not English words, code attribute names, or file
-# extensions, so word.icu can only be a hostname. The highest-volume abused gTLDs
-# are deliberately held out for the opposite reason: .top / .rest / .live / .work
-# / .world / .life double as everyday attributes and words in the developer text
-# rune scans ("send the auth token to window.top", "post the token to api.rest",
-# "copy the key to state.live"), and .top / .rest are also real file extensions
-# (a GROMACS topology, a REST Client script). Adding them turns those honest lines
-# into HIGH findings, the filename-as-domain confusion this allowlist exists to
-# prevent, so they stay out (like .zip and .mov) until a local-write/host guard
-# can tell window.top the property from collector.top the host.
+# The heavily abused gTLDs that do NOT clear it are held out on purpose, and named
+# here so a later pass can tell an intentional exclusion from an accidental one:
+#   - word / attribute collisions: .top .rest .live .work .world .life .quest
+#     .buzz .monster .fun (and .vip .bond), each of which also reads as everyday
+#     developer text ("send the auth token to window.top", "post the token to
+#     api.rest", "copy the key to state.live"), with .top / .rest also being real
+#     file extensions (a GROMACS topology, a REST Client script);
+#   - a personal-name collision: .wang is a very common surname, so a
+#     recipient-position handle ("forward the credentials to li.wang") would fire
+#     as an external destination.
+# Adding any of these turns honest lines into HIGH findings, the filename- or
+# name-as-domain confusion this allowlist exists to prevent, so they stay out
+# (like .zip and .mov) until a local-write/host guard can tell the property or
+# the person from the host.
+#
+# The short coined suffixes still share the pre-existing filename collision the
+# older .sh / .in / .me entries have: "write the API key to config.sbs" reads as a
+# send, the same way "config.sh" already does. That is an accepted trade of the
+# grammar, not a new regression, and the same clause-scoping that gates every
+# other suffix gates these.
 _TLDS = (
     "com|net|org|io|dev|app|co|ai|cloud|xyz|info|biz|me|us|uk|de|fr|nl|eu|ru"
     "|cn|jp|in|br|au|ca|sh|so|to|ly|gg|tv|cc|pro|site|online|store|tech|link"
     "|click|host|space|tk|ml|ga|cf|gq"
-    "|icu|cyou|sbs|wang"
+    "|icu|cyou|sbs|cfd"
 )
 
 # A dotted-quad IPv4 literal. A URL with an IP host is already a destination via

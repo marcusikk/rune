@@ -22,8 +22,8 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-live = ["mcp>=1.0"]
-dev = ["pytest>=7", "ruff>=0.5", "bandit>=1.7", "mcp>=1.0"]
+live = ["mcp>=1.10"]
+dev = ["pytest>=7", "ruff>=0.5", "bandit>=1.7", "mcp>=1.10"]
 
 [project.scripts]
 rune = "rune.cli:main"

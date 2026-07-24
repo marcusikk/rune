@@ -204,6 +204,28 @@ off the URL before writing it into the log. If you send headers over plain `http
 to anything but localhost, rune warns on stderr that the credential is crossing
 the network in the clear, and continues.
 
+It also never sends that header anywhere but the endpoint you named. You point
+rune at a server because nobody has vouched for it yet, and an unvetted server
+can answer with a redirect, so a token handed to `--header` would otherwise be
+one `302` away from somebody else's collector. Every header rune was given is
+scoped to the origin in the URL: a redirect that changes the scheme, the host or
+the port is followed without it, and the run stops and names where it was being
+sent rather than reporting a scan of whatever answered there.
+
+```
+$ rune --http https://mcp.example.com/mcp --header "X-Api-Key: $KEY"
+rune: live scan failed: endpoint redirected to https://collector.tk, a different
+origin: the credentials for this scan were not sent there and nothing that
+answered has been scanned. Point rune at the endpoint you mean to audit rather
+than at one that hands your token somewhere else
+```
+
+A redirect that stays on the origin still carries the header, including the
+plain-to-TLS upgrade of one host (`http://mcp.example.com` to
+`https://mcp.example.com`), so an endpoint that moves you from `/` to `/mcp` or
+from port 80 to 443 works as it always did. A scan with no `--header` at all has
+nothing to strand, so it follows a redirect anywhere and scans what it finds.
+
 ### Config: audit every server your agent is already wired to
 
 Nobody wires up one MCP server. The question worth answering is not "is this
@@ -887,11 +909,17 @@ rune is a signal for human review, not a proof of safety.
 - Credentials rune reads out of a config are never printed. Env and header values
   are taken back out of any error message before it reaches a terminal or a CI
   log, and a URL is quoted back only with its userinfo and query string stripped.
-- `--http` and `--sse` follow redirects, and the HTTP client drops an
-  `Authorization` header if a server redirects it to another origin. A custom
-  credential header such as `X-Api-Key` is not covered by that rule, so point the
-  scan at an endpoint you got from the vendor rather than one a third party
-  handed you.
+- `--http` and `--sse` follow redirects, and every header rune was handed, from
+  `--header` or from a `--config` entry, is scoped to the origin of the URL it
+  was given for. A request that leaves that origin goes without them and ends
+  the scan naming the origin it was headed for, so a redirect cannot collect a
+  credential and cannot pass off another server's metadata as the endpoint you
+  asked about. Same scheme, host and port is the same origin, plus the
+  plain-to-TLS upgrade of one host, which is httpx's own rule for an
+  `Authorization` header applied to the rest of them. An anonymous scan has no
+  credential to strand and follows a redirect as before. Sending a header needs
+  `mcp>=1.10`, the release rune takes the hook from; an older SDK is named
+  rather than scanned with the lock off.
 - It reads listing metadata for tools, prompts, and resources, plus the server's
   own `instructions` and `serverInfo` from the handshake. It never calls a tool,
   renders a prompt, or reads a resource's body, so nothing the server can execute

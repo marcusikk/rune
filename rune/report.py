@@ -418,6 +418,13 @@ _SARIF_RULES: tuple[tuple[str, str, str], ...] = (
         "error",
     ),
     (
+        "base64-payload",
+        "A base64-encoded run that decodes to a payload another rule catches, "
+        "used to hide it from the ASCII rules while a model decodes and acts on "
+        "it.",
+        "error",
+    ),
+    (
         "injection-markup",
         "Markup a model may read as an instruction boundary, such as <system>, "
         "[INST], Llama's <<SYS>>, a Gemma turn marker, or a model special token "

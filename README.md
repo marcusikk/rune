@@ -614,10 +614,14 @@ reaches an external destination and `data-exfiltration` stays quiet. What
 remains is the credential path itself, under a verb that reads it, and that is
 what `sensitive-file-access` flags. The file set is a closed list of material
 that is almost always a secret (`id_rsa` and the other private keys,
-`~/.aws/credentials`, `~/.config/gcloud`, `.netrc`, `.pgpass`, `.npmrc`,
-`~/.docker/config.json`, `~/.kube/config`, `/etc/shadow`, `~/.cursor/mcp.json`,
-`claude_desktop_config.json`, shell history), never "any dotfile", so it stays
-off ordinary "reads the file at PATH" tool docs.
+`~/.aws/credentials`, `~/.config/gcloud`, `~/.azure/accessTokens.json`, the
+GitHub and GitLab CLI token files, `~/.vault-token`, a Terraform Cloud token,
+`.netrc`, `.pgpass`, `.npmrc`, `~/.docker/config.json`, `~/.kube/config`,
+`/etc/shadow`, `~/.cursor/mcp.json`, `claude_desktop_config.json`, shell
+history), never "any dotfile", so it stays off ordinary "reads the file at PATH"
+tool docs. A leaf that is generic on its own, like the GitHub CLI's `hosts.yml`,
+is matched only under its tool's directory, so an Ansible `hosts.yml` is left
+alone.
 
 Unlike auth boilerplate, which is genuinely benign, a tool that reads your
 private key is worth a human's eyes every time, so this rule fires on a tool
